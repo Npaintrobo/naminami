@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>波の映像シミュレーション</title>
+  <style>
+    :root {
+      --bg-1: #031525;
+      --bg-2: #0d2d45;
+      --panel: rgba(6, 18, 31, 0.78);
+      --border: rgba(255, 255, 255, 0.16);
+      --text: #eaf7ff;
+      --muted: #9fc0d6;
+      --accent: #58d7ff;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Yu Gothic UI", "Hiragino Sans", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top, rgba(88, 215, 255, 0.18), transparent 32%),
+        linear-gradient(160deg, var(--bg-1), var(--bg-2) 58%, #05111d);
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+    }
+
+    .shell {
+      width: min(1100px, calc(100vw - 32px));
+      display: grid;
+      gap: 14px;
+      padding: 18px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.5rem, 3vw, 2.4rem);
+      line-height: 1.1;
+      letter-spacing: 0.03em;
+    }
+
+    .subtitle {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.96rem;
+    }
+
+    .legend {
+      display: grid;
+      gap: 8px;
+      min-width: min(320px, 100%);
+    }
+
+    .legend-bar {
+      height: 14px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #004fff 0%, #00e5ff 35%, #ffe566 70%, #ff2600 100%);
+      border: 1px solid var(--border);
+      box-shadow: inset 0 0 18px rgba(255, 255, 255, 0.15);
+    }
+
+    .legend-labels {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .frame {
+      position: relative;
+      border-radius: 28px;
+      padding: 14px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.03));
+      border: 1px solid var(--border);
+      box-shadow:
+        0 24px 60px rgba(0, 0, 0, 0.36),
+        inset 0 1px 0 rgba(255, 255, 255, 0.09);
+      backdrop-filter: blur(10px);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .control-card {
+      padding: 14px;
+      border-radius: 20px;
+      background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+      border: 1px solid var(--border);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    }
+
+    .control-card.wide {
+      grid-column: span 3;
+    }
+
+    .control-title {
+      margin: 0 0 10px;
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+
+    .summary-value {
+      margin: 0;
+      font-size: 1.05rem;
+      line-height: 1.45;
+    }
+
+    .summary-sub {
+      margin: 6px 0 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.5;
+    }
+
+    .slider-wrap {
+      margin-top: 12px;
+      display: grid;
+      gap: 8px;
+    }
+
+    .slider-label {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    .speed-slider {
+      width: 100%;
+      accent-color: #58d7ff;
+      cursor: pointer;
+    }
+
+    .joystick-shell {
+      display: grid;
+      grid-template-columns: 190px minmax(0, 1fr);
+      gap: 18px;
+      align-items: center;
+    }
+
+    .joystick-pad {
+      position: relative;
+      width: 190px;
+      height: 190px;
+      border-radius: 50%;
+      border: 1px solid rgba(88, 215, 255, 0.36);
+      background:
+        radial-gradient(circle at center, rgba(88, 215, 255, 0.12), transparent 46%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+      box-shadow:
+        inset 0 0 30px rgba(88, 215, 255, 0.08),
+        0 14px 40px rgba(0, 0, 0, 0.2);
+      touch-action: none;
+      user-select: none;
+      cursor: grab;
+    }
+
+    .joystick-pad::before,
+    .joystick-pad::after {
+      content: "";
+      position: absolute;
+      background: rgba(255, 255, 255, 0.14);
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .joystick-pad::before {
+      width: 2px;
+      height: calc(100% - 26px);
+    }
+
+    .joystick-pad::after {
+      width: calc(100% - 26px);
+      height: 2px;
+    }
+
+    .joystick-knob {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 58px;
+      height: 58px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 35% 30%, #ffffff, #9de6ff 42%, #1c799d 100%);
+      box-shadow:
+        0 10px 22px rgba(0, 0, 0, 0.34),
+        inset 0 1px 8px rgba(255, 255, 255, 0.5);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    .joystick-info {
+      display: grid;
+      gap: 10px;
+    }
+
+    .joystick-readout {
+      margin: 0;
+      font-size: 0.98rem;
+      line-height: 1.55;
+      color: var(--text);
+    }
+
+    .joystick-sub {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.85rem;
+      line-height: 1.6;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      border-radius: 18px;
+      background: #020913;
+      cursor: crosshair;
+    }
+
+    .hud {
+      position: absolute;
+      left: 28px;
+      bottom: 26px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      pointer-events: none;
+    }
+
+    .chip {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.84rem;
+      letter-spacing: 0.01em;
+    }
+
+    @media (max-width: 720px) {
+      .shell {
+        width: calc(100vw - 18px);
+        padding: 10px;
+      }
+
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      .control-card.wide {
+        grid-column: auto;
+      }
+
+      .joystick-shell {
+        grid-template-columns: 1fr;
+        justify-items: center;
+      }
+
+      .frame {
+        padding: 10px;
+        border-radius: 20px;
+      }
+
+      .hud {
+        left: 18px;
+        bottom: 18px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="topbar">
+      <div>
+        <h1>波の映像シミュレーション</h1>
+        <p class="subtitle">X波とY波を1モータずつ持たせて、正転・逆転・停止の組み合わせによる全方向移動の原理を確認できます。</p>
+      </div>
+      <div class="legend" aria-label="高さの色凡例">
+        <div class="legend-bar"></div>
+        <div class="legend-labels">
+          <span>低い</span>
+          <span>高い</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="frame">
+      <section class="controls" aria-label="モータ制御">
+        <div class="control-card">
+          <p class="control-title">Xモータ</p>
+          <div class="slider-wrap">
+            <div class="slider-label">
+              <span>波速度</span>
+              <span id="speedValueX">1.00</span>
+            </div>
+            <input class="speed-slider" id="speedSliderX" type="range" min="-3" max="3" step="0.05" value="1">
+          </div>
+        </div>
+        <div class="control-card">
+          <p class="control-title">Yモータ</p>
+          <div class="slider-wrap">
+            <div class="slider-label">
+              <span>波速度</span>
+              <span id="speedValueY">1.00</span>
+            </div>
+            <input class="speed-slider" id="speedSliderY" type="range" min="-3" max="3" step="0.05" value="1">
+          </div>
+        </div>
+        <div class="control-card">
+          <p class="control-title">合成移動</p>
+          <p class="summary-value" id="resultLabel">右下へ移動</p>
+          <p class="summary-sub" id="resultDetail">X: 正転 1.00 / Y: 正転 1.00</p>
+        </div>
+        <div class="control-card wide">
+          <p class="control-title">ジョイスティック</p>
+          <div class="joystick-shell">
+            <div class="joystick-pad" id="joystickPad" aria-label="ジョイスティック">
+              <div class="joystick-knob" id="joystickKnob"></div>
+            </div>
+            <div class="joystick-info">
+              <p class="joystick-readout" id="joystickReadout">X: 正転 1.00 / Y: 正転 1.00</p>
+              <p class="joystick-sub">ドラッグした方向で逆転と正転、中心で停止になります。X/Y の波速度をそのまま連続値で操作できます。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+      <canvas id="wave" width="960" height="540" aria-label="波シミュレーション"></canvas>
+      <div class="hud">
+        <div class="chip">操作: X/Yモータを切替</div>
+        <div class="chip">原理: X波 + Y波 の高さ合成</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("wave");
+    const ctx = canvas.getContext("2d");
+    const resultLabel = document.getElementById("resultLabel");
+    const resultDetail = document.getElementById("resultDetail");
+    const speedSliderX = document.getElementById("speedSliderX");
+    const speedSliderY = document.getElementById("speedSliderY");
+    const speedValueX = document.getElementById("speedValueX");
+    const speedValueY = document.getElementById("speedValueY");
+    const joystickPad = document.getElementById("joystickPad");
+    const joystickKnob = document.getElementById("joystickKnob");
+    const joystickReadout = document.getElementById("joystickReadout");
+
+    const simulationScale = 3;
+    const bufferCanvas = document.createElement("canvas");
+    const bufferCtx = bufferCanvas.getContext("2d");
+    let simWidth = Math.floor(canvas.width / simulationScale);
+    let simHeight = Math.floor(canvas.height / simulationScale);
+
+    let imageData = ctx.createImageData(simWidth, simHeight);
+    const motorVelocity = { x: 1, y: 1 };
+    const probe = { x: 0.5, y: 0.5 };
+    const joystick = { x: 0.333, y: 0.333, active: false };
+
+    function resizeCanvas() {
+      const frameWidth = Math.min(window.innerWidth - 52, 1100);
+      const targetWidth = Math.max(320, Math.floor(frameWidth - 64));
+      const targetHeight = Math.floor(targetWidth * 9 / 16);
+
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+
+      simWidth = Math.floor(canvas.width / simulationScale);
+      simHeight = Math.floor(canvas.height / simulationScale);
+      bufferCanvas.width = simWidth;
+      bufferCanvas.height = simHeight;
+      imageData = ctx.createImageData(simWidth, simHeight);
+      probe.x = 0.5;
+      probe.y = 0.5;
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function colorForHeight(value) {
+      const normalized = clamp(value * 0.5 + 0.5, 0, 1);
+
+      if (normalized < 0.35) {
+        const t = normalized / 0.35;
+        return [
+          Math.round(0 + (0 * t)),
+          Math.round(79 + (229 - 79) * t),
+          Math.round(255 + (255 - 255) * t)
+        ];
+      }
+
+      if (normalized < 0.7) {
+        const t = (normalized - 0.35) / 0.35;
+        return [
+          Math.round(0 + (255 - 0) * t),
+          Math.round(229 + (229 - 229) * t),
+          Math.round(255 + (102 - 255) * t)
+        ];
+      }
+
+      const t = (normalized - 0.7) / 0.3;
+      return [
+        Math.round(255 + (255 - 255) * t),
+        Math.round(229 + (38 - 229) * t),
+        Math.round(102 + (0 - 102) * t)
+      ];
+    }
+
+    function motorLabel(value, axis) {
+      if (value > 0) {
+        return axis === "x" ? "正転(X+)" : "正転(Y+)";
+      }
+
+      if (value < 0) {
+        return axis === "x" ? "逆転(X-)" : "逆転(Y-)";
+      }
+
+      return "停止";
+    }
+
+    function combinedDirectionLabel() {
+      const x = motorVelocity.x;
+      const y = motorVelocity.y;
+
+      if (x === 0 && y === 0) {
+        return "停止";
+      }
+
+      const horizontal = x > 0 ? "右" : x < 0 ? "左" : "";
+      const vertical = y > 0 ? "下" : y < 0 ? "上" : "";
+      return `${horizontal}${vertical}へ移動`;
+    }
+
+    function syncControls() {
+      speedSliderX.value = String(motorVelocity.x);
+      speedSliderY.value = String(motorVelocity.y);
+      resultLabel.textContent = combinedDirectionLabel();
+      speedValueX.textContent = motorVelocity.x.toFixed(2);
+      speedValueY.textContent = motorVelocity.y.toFixed(2);
+      resultDetail.textContent = `X: ${motorLabel(motorVelocity.x, "x")} ${Math.abs(motorVelocity.x).toFixed(2)} / Y: ${motorLabel(motorVelocity.y, "y")} ${Math.abs(motorVelocity.y).toFixed(2)}`;
+      joystickReadout.textContent = `X: ${motorLabel(motorVelocity.x, "x")} ${Math.abs(motorVelocity.x).toFixed(2)} / Y: ${motorLabel(motorVelocity.y, "y")} ${Math.abs(motorVelocity.y).toFixed(2)}`;
+      updateJoystickKnob();
+    }
+
+    function updateJoystickKnob() {
+      const radius = joystickPad.clientWidth * 0.5 - 29;
+      joystickKnob.style.left = `${50 + joystick.x * radius / joystickPad.clientWidth * 100}%`;
+      joystickKnob.style.top = `${50 + joystick.y * radius / joystickPad.clientHeight * 100}%`;
+    }
+
+    function applyAxis(axis, value) {
+      const deadZone = 0.08;
+
+      if (Math.abs(value) < deadZone) {
+        motorVelocity[axis] = 0;
+        return;
+      }
+
+      motorVelocity[axis] = Number((Math.min(1, value) * 3).toFixed(2));
+    }
+
+    function syncJoystickFromState() {
+      joystick.x = motorVelocity.x / 3;
+      joystick.y = motorVelocity.y / 3;
+    }
+
+    function updateFromJoystick(clientX, clientY) {
+      const rect = joystickPad.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const radius = rect.width / 2 - 29;
+      let dx = clientX - centerX;
+      let dy = clientY - centerY;
+      const distance = Math.hypot(dx, dy);
+
+      if (distance > radius) {
+        const scale = radius / distance;
+        dx *= scale;
+        dy *= scale;
+      }
+
+      joystick.x = dx / radius;
+      joystick.y = dy / radius;
+      applyAxis("x", joystick.x);
+      applyAxis("y", joystick.y);
+      syncControls();
+    }
+
+    function resetJoystick() {
+      joystick.x = 0;
+      joystick.y = 0;
+      motorVelocity.x = 0;
+      motorVelocity.y = 0;
+      syncControls();
+    }
+
+    function heightAt(x, y, time) {
+      const t = time * 0.001;
+      const amplitudeY = 0.5;
+      const amplitudeX = 0.5;
+      const waveNumberY = 0.1;
+      const waveNumberX = 0.1;
+      const angularFrequencyY = 2.8;
+      const angularFrequencyX = 2.8;
+      const verticalWave = amplitudeY * Math.sin(waveNumberY * y - motorVelocity.y * angularFrequencyY * t);
+      const horizontalWave = amplitudeX * Math.sin(waveNumberX * x - motorVelocity.x * angularFrequencyX * t);
+
+      return verticalWave + horizontalWave;
+    }
+
+    function update(time) {
+      const pixels = imageData.data;
+
+      for (let y = 0; y < simHeight; y += 1) {
+        for (let x = 0; x < simWidth; x += 1) {
+          const index = y * simWidth + x;
+          const [r, g, b] = colorForHeight(heightAt(x, y, time));
+          const pixelIndex = index * 4;
+          pixels[pixelIndex] = r;
+          pixels[pixelIndex + 1] = g;
+          pixels[pixelIndex + 2] = b;
+          pixels[pixelIndex + 3] = 255;
+        }
+      }
+    }
+
+    function render() {
+      bufferCtx.putImageData(imageData, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(bufferCanvas, 0, 0, simWidth, simHeight, 0, 0, canvas.width, canvas.height);
+    }
+
+    function updateProbe() {
+      const speed = 0.0028;
+      probe.x = clamp(probe.x + motorVelocity.x * speed, 0.08, 0.92);
+      probe.y = clamp(probe.y + motorVelocity.y * speed, 0.08, 0.92);
+    }
+
+    function drawOverlay() {
+      const centerX = canvas.width - 110;
+      const centerY = 90;
+      const arrowScale = 34;
+      const normalizedX = clamp(motorVelocity.x / 3, -1, 1);
+      const normalizedY = clamp(motorVelocity.y / 3, -1, 1);
+      const endX = centerX + normalizedX * arrowScale;
+      const endY = centerY + normalizedY * arrowScale;
+
+      ctx.save();
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(255,255,255,0.92)";
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.beginPath();
+      ctx.arc(centerX, centerY, 22, 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (motorVelocity.x !== 0 || motorVelocity.y !== 0) {
+        const angle = Math.atan2(endY - centerY, endX - centerX);
+        ctx.beginPath();
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(endX, endY);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(endX, endY);
+        ctx.lineTo(endX - 10 * Math.cos(angle - Math.PI / 6), endY - 10 * Math.sin(angle - Math.PI / 6));
+        ctx.lineTo(endX - 10 * Math.cos(angle + Math.PI / 6), endY - 10 * Math.sin(angle + Math.PI / 6));
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      const probeX = probe.x * canvas.width;
+      const probeY = probe.y * canvas.height;
+      ctx.fillStyle = "#ffffff";
+      ctx.strokeStyle = "rgba(2, 9, 19, 0.9)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(probeX, probeY, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    function frame(time) {
+      update(time);
+      render();
+      updateProbe();
+      drawOverlay();
+      requestAnimationFrame(frame);
+    }
+
+    speedSliderX.addEventListener("input", () => {
+      motorVelocity.x = Number(speedSliderX.value);
+      syncJoystickFromState();
+      syncControls();
+    });
+
+    speedSliderY.addEventListener("input", () => {
+      motorVelocity.y = Number(speedSliderY.value);
+      syncJoystickFromState();
+      syncControls();
+    });
+
+    joystickPad.addEventListener("pointerdown", (event) => {
+      joystick.active = true;
+      joystickPad.setPointerCapture(event.pointerId);
+      updateFromJoystick(event.clientX, event.clientY);
+    });
+
+    joystickPad.addEventListener("pointermove", (event) => {
+      if (!joystick.active) {
+        return;
+      }
+
+      updateFromJoystick(event.clientX, event.clientY);
+    });
+
+    const releaseJoystick = (event) => {
+      if (!joystick.active) {
+        return;
+      }
+
+      joystick.active = false;
+      if (event && joystickPad.hasPointerCapture(event.pointerId)) {
+        joystickPad.releasePointerCapture(event.pointerId);
+      }
+      resetJoystick();
+    };
+
+    joystickPad.addEventListener("pointerup", releaseJoystick);
+    joystickPad.addEventListener("pointercancel", releaseJoystick);
+
+    window.addEventListener("resize", resizeCanvas);
+
+    resizeCanvas();
+    syncJoystickFromState();
+    syncControls();
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
