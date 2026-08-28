@@ -744,11 +744,11 @@
     /* 歯は上下するだけでなく、同じ半径で前後にも動く。
        推力を生むのはこちらの水平成分なので、位置にも反映する。 */
     function swayX(i) {
-      return hw.crank * Math.sin(i * hw.phaseStep * DEG - railPhase.x);
+      return -hw.crank * Math.sin(i * hw.phaseStep * DEG - railPhase.x);
     }
 
     function swayY(j) {
-      return hw.crank * Math.sin(j * hw.phaseStep * DEG - railPhase.y);
+      return -hw.crank * Math.sin(j * hw.phaseStep * DEG - railPhase.y);
     }
 
     function contactReach() {

@@ -605,7 +605,7 @@
 
     for (let i = 0; i < RAILS; i += 1) {
       const th = i * PHASE_STEP - phase.x;
-      const ox = CRANK * Math.sin(th);
+      const ox = -CRANK * Math.sin(th);
       const oy = CRANK * Math.cos(th) + liftOf("x") + liftX;
       const x = railPos(i) + ox;
 
@@ -626,7 +626,7 @@
 
     for (let j = 0; j < RAILS; j += 1) {
       const th = j * PHASE_STEP - phase.y;
-      const oz = CRANK * Math.sin(th);
+      const oz = -CRANK * Math.sin(th);
       const oy = CRANK * Math.cos(th) + liftOf("y") + liftY;
       const z = railPos(j) + oz;
 
