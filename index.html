@@ -741,6 +741,16 @@
       return hw.crank * Math.cos(j * hw.phaseStep * DEG - railPhase.y) + railOffset("y");
     }
 
+    /* 歯は上下するだけでなく、同じ半径で前後にも動く。
+       推力を生むのはこちらの水平成分なので、位置にも反映する。 */
+    function swayX(i) {
+      return hw.crank * Math.sin(i * hw.phaseStep * DEG - railPhase.x);
+    }
+
+    function swayY(j) {
+      return hw.crank * Math.sin(j * hw.phaseStep * DEG - railPhase.y);
+    }
+
     function contactReach() {
       return hw.pitch * 1.25;
     }
@@ -770,7 +780,8 @@
       out.length = 0;
 
       for (let i = 0; i < hw.rails; i += 1) {
-        const gap = Math.abs((i + 0.5) * hw.pitch - center);
+        const sway = axis === "x" ? swayX(i) : swayY(i);
+        const gap = Math.abs((i + 0.5) * hw.pitch + sway - center);
 
         if (gap > reach) {
           continue;
@@ -913,16 +924,18 @@
       /* Xラティス: 四角い歯。列 i の全歯が同じ高さ = レール1本ぶん。 */
       for (let i = 0; i < hw.rails; i += 1) {
         const h = heightX(i);
+        const sway = swayX(i);
         for (let j = 0; j < hw.rails - 1; j += 1) {
-          drawTooth(view, (i + 0.5) * hw.pitch, (j + 1) * hw.pitch, h, false, dimX);
+          drawTooth(view, (i + 0.5) * hw.pitch + sway, (j + 1) * hw.pitch, h, false, dimX);
         }
       }
 
       /* Yラティス: 丸い歯。(p/2, p/2) ずらしてあるので干渉しない。 */
       for (let j = 0; j < hw.rails; j += 1) {
         const h = heightY(j);
+        const sway = swayY(j);
         for (let i = 0; i < hw.rails - 1; i += 1) {
-          drawTooth(view, (i + 1) * hw.pitch, (j + 0.5) * hw.pitch, h, true, dimY);
+          drawTooth(view, (i + 1) * hw.pitch, (j + 0.5) * hw.pitch + sway, h, true, dimY);
         }
       }
 
