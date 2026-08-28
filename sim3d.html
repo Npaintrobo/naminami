@@ -239,6 +239,7 @@
     <div class="cell"><dt>波速 max</dt><dd id="rWave">500 mm/s</dd></div>
     <div class="cell"><dt>搬送</dt><dd id="rLoad">0 mm/s</dd></div>
     <div class="cell"><dt>荷重分担</dt><dd id="rShare">50 / 50</dd></div>
+    <div class="cell"><dt>方向 実測/指令</dt><dd id="rDir">— / —</dd></div>
   </dl>
 </div>
 
@@ -253,11 +254,17 @@
     <input type="range" id="sY" min="-3" max="3" step="0.05" value="1">
   </div>
   <div class="grp">
+    <div class="grp-head"><span>交替周波数</span><b id="vA">8.0 Hz</b></div>
+    <input type="range" id="sA" min="1" max="20" step="0.5" value="8">
+  </div>
+  <div class="grp">
     <div class="grp-head"><span>層を分解して見る</span><b id="vE">0 mm</b></div>
     <input type="range" id="sE" min="0" max="140" step="1" value="0">
   </div>
 
   <div class="checks">
+    <label class="chk"><input type="checkbox" id="cFull"> 全面接地にする（地面を走る車両として見る）</label>
+    <label class="chk"><input type="checkbox" id="cAlt"> XとYを時間交替で接地させる</label>
     <label class="chk"><input type="checkbox" id="cRetract" checked> 停止軸をリトラクト（退避）</label>
     <label class="chk"><input type="checkbox" id="cMech" checked> クランク軸と偏心ハブを表示</label>
     <label class="chk"><input type="checkbox" id="cEdge" checked> 稜線を描く</label>
@@ -290,7 +297,8 @@
   const PHASE_STEP = Math.PI / 3;      // 60°
   const CRANK = 6;                     // 偏心量 r
   const MAX_RPM = 300;
-  const GRIP = 0.55;                   // 伝達効率 η
+  const MU_G = 0.6 * 9810;             // 摩擦係数 × 重力加速度 [mm/s^2]
+  const VEPS = 6;                      // 静止摩擦へ移る滑り速度の幅 [mm/s]
   const TABLE = RAILS * PITCH;         // 600
   const HALF = TABLE / 2;
 
@@ -315,8 +323,11 @@
   const motor = { x: 1, y: 1 };
   const phase = { x: 0, y: 0 };
   const puck = { x: 0, z: 0, y: DECK + PUCK_T };
+  const vel = { x: 0, z: 0 };
+  let altPhase = 0;
   const view = { yaw: 0.72, pitch: 0.58, dist: 1040 };
-  const opt = { retract: true, mech: true, edge: true, explode: 0, paused: false };
+  const opt = { retract: true, mech: true, edge: true, explode: 0, paused: false,
+                alternate: false, altHz: 8, fullContact: false };
   const trail = [];
   let shareX = 0.5, loadSpeed = 0;
   // 分担も推力も、2つのラティスが荷を奪い合うので瞬時値は 0/1 を往復する。
@@ -327,8 +338,26 @@
   const omega = axis => motor[axis] / 3 * MAX_RPM * Math.PI / 30;
   const rpm = axis => Math.abs(motor[axis]) / 3 * MAX_RPM;
   const railLift = axis => (opt.retract && motor[axis] === 0 ? -2 * CRANK : 0);
-  const heightX = i => CRANK * Math.cos(i * PHASE_STEP - phase.x) + railLift("x");
-  const heightY = j => CRANK * Math.cos(j * PHASE_STEP - phase.y) + railLift("y");
+
+  /* X と Y を同時に接地させると、X の足は「vx = r·ωx かつ vz = 0」を、
+     Y の足は「vz = r·ωy かつ vx = 0」を要求して過拘束になる。どちらかが必ず滑り、
+     しかもクーロン摩擦は滑り速度に依らないので、遅いほうがフルの摩擦力で
+     ブレーキとして効く。結果として操舵が大きく歪む。
+     交互に持ち上げて接地するラティスを常に1つに保てば、これが消える。 */
+  function altLift(axis) {
+    if (!opt.alternate) return 0;
+    const liveX = !(opt.retract && motor.x === 0);
+    const liveY = !(opt.retract && motor.y === 0);
+    if (!liveX || !liveY) return 0;          // 片方しか使えないなら交替する意味がない
+
+    // 台形波。カムで切り替える以上、乗り移りには有限の時間がかかる
+    const wave = clamp(Math.cos(2 * Math.PI * altPhase) * 2.5, -1, 1) * 0.5 + 0.5;
+    return -2 * CRANK * (1 - (axis === "x" ? wave : 1 - wave));
+  }
+
+  const liftOf = axis => railLift(axis) + altLift(axis);
+  const heightX = i => CRANK * Math.cos(i * PHASE_STEP - phase.x) + liftOf("x");
+  const heightY = j => CRANK * Math.cos(j * PHASE_STEP - phase.y) + liftOf("y");
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
   /* ================================================================
@@ -345,10 +374,17 @@
     out.length = 0;
 
     for (let k = 0; k < RAILS; k += 1) {
-      const gap = Math.abs(railPos(k) - center);
-      if (gap > REACH) continue;
-      const coverage = clamp((REACH - gap) / feather, 0, 1);
-      if (coverage <= 0) continue;
+      let coverage = 1;
+
+      /* 卓上は小さい荷が数列にだけ乗る。車両にすると全列が地面に接する。
+         荷が動くと接地列が入れ替わるので、卓上のほうが分担のかたよりが均される。 */
+      if (!opt.fullContact) {
+        const gap = Math.abs(railPos(k) - center);
+        if (gap > REACH) continue;
+        coverage = clamp((REACH - gap) / feather, 0, 1);
+        if (coverage <= 0) continue;
+      }
+
       const h = axis === "x" ? heightX(k) : heightY(k);
       out.push(coverage, h);
       if (h > top) top = h;
@@ -368,6 +404,7 @@
   function advance(dt) {
     phase.x += omega("x") * dt;
     phase.y += omega("y") * dt;
+    altPhase += opt.altHz * dt;
 
     const topX = gather("x");
     const topY = gather("y");
@@ -377,23 +414,44 @@
     const total = lx + ly;
     shareX = total > 0 ? lx / total : 0.5;
 
-    const vx = GRIP * CRANK * omega("x") * shareX;
-    const vz = GRIP * CRANK * omega("y") * (1 - shareX);
-    const limit = HALF - PUCK_H;
+    /* 推力は「速度差」から出るのではない。足はクランクで運動学的に拘束されていて、
+       食いついていれば静止摩擦で荷が運ばれる。滑りは推力の源ではなく損失。
+       だからここはクーロン摩擦の力の釣り合いで解く。VEPS 以下は静止摩擦とみなす。 */
+    const tipX = CRANK * omega("x");
+    const tipZ = CRANK * omega("y");
+    const ax = vel.x - tipX, az = vel.z;
+    const bx = vel.x, bz = vel.z - tipZ;
+    const sa = Math.max(Math.hypot(ax, az), VEPS);
+    const sb = Math.max(Math.hypot(bx, bz), VEPS);
 
-    puck.x = clamp(puck.x + vx * dt, -limit, limit);
-    puck.z = clamp(puck.z + vz * dt, -limit, limit);
+    vel.x -= MU_G * (shareX * ax / sa + (1 - shareX) * bx / sb) * dt;
+    vel.z -= MU_G * (shareX * az / sa + (1 - shareX) * bz / sb) * dt;
+
+    puck.x += vel.x * dt;
+    puck.z += vel.z * dt;
+
+    /* 波の場は λ=300mm 周期で、盤面 600mm はちょうど 2 波長。
+       端で反対側へ巻き戻せば無限に続く盤面と厳密に等価になる。
+       端で止めてしまうと読み出しが張り付いて意味をなくす。 */
+    let wrapped = false;
+    if (puck.x > HALF) { puck.x -= 2 * HALF; wrapped = true; }
+    if (puck.x < -HALF) { puck.x += 2 * HALF; wrapped = true; }
+    if (puck.z > HALF) { puck.z -= 2 * HALF; wrapped = true; }
+    if (puck.z < -HALF) { puck.z += 2 * HALF; wrapped = true; }
+    if (wrapped) trail.length = 0;
+
     puck.y = DECK + Math.max(topX, topY) + PUCK_T;
 
-    accVx += vx * dt;
-    accVz += vz * dt;
+    accVx += vel.x * dt;
+    accVz += vel.z * dt;
     accShare += shareX * dt;
     accDt += dt;
   }
 
   function step(dt) {
+    // 山のリップルを解く刻みと、摩擦の減衰 MU_G/VEPS を安定に積む刻みの厳しいほう
     const fastest = Math.max(Math.abs(omega("x")), Math.abs(omega("y")));
-    const n = clamp(Math.ceil(fastest * dt / 0.035), 1, 96);
+    const n = clamp(Math.ceil(Math.max(fastest * dt / 0.035, dt / 5e-4)), 1, 200);
     for (let s = 0; s < n; s += 1) advance(dt / n);
 
     if (accDt > 0) {
@@ -548,12 +606,12 @@
     for (let i = 0; i < RAILS; i += 1) {
       const th = i * PHASE_STEP - phase.x;
       const ox = CRANK * Math.sin(th);
-      const oy = CRANK * Math.cos(th) + railLift("x") + liftX;
+      const oy = CRANK * Math.cos(th) + liftOf("x") + liftX;
       const x = railPos(i) + ox;
 
       box(x, X_BODY_C + oy, 0, 6, X_BODY_H, HALF, MAT_X_BODY);
 
-      const pad = rampOf(RAMP_X, heightX(i) - railLift("x"));
+      const pad = rampOf(RAMP_X, heightX(i) - liftOf("x"));
       for (let j = 0; j < RAILS - 1; j += 1) {
         box(x, X_PAD_C + oy, toothPos(j), 10, X_PAD_H, 10, pad);
       }
@@ -569,12 +627,12 @@
     for (let j = 0; j < RAILS; j += 1) {
       const th = j * PHASE_STEP - phase.y;
       const oz = CRANK * Math.sin(th);
-      const oy = CRANK * Math.cos(th) + railLift("y") + liftY;
+      const oy = CRANK * Math.cos(th) + liftOf("y") + liftY;
       const z = railPos(j) + oz;
 
       box(0, Y_BODY_C + oy, z, HALF, Y_BODY_H, 6, MAT_Y_BODY);
 
-      const tooth = rampOf(RAMP_Y, heightY(j) - railLift("y"));
+      const tooth = rampOf(RAMP_Y, heightY(j) - liftOf("y"));
       for (let i = 0; i < RAILS - 1; i += 1) {
         box(toothPos(i), Y_TOOTH_C + oy, z, 9, Y_TOOTH_H, 9, tooth);
       }
@@ -686,8 +744,9 @@
      UI
      ================================================================ */
   const el = id => document.getElementById(id);
-  const sX = el("sX"), sY = el("sY"), sE = el("sE");
-  const vXo = el("vX"), vYo = el("vY"), vEo = el("vE");
+  const sX = el("sX"), sY = el("sY"), sE = el("sE"), sA = el("sA");
+  const vXo = el("vX"), vYo = el("vY"), vEo = el("vE"), vAo = el("vA");
+  const rDir = el("rDir");
   const rXo = el("rX"), rYo = el("rY"), rWave = el("rWave"), rLoad = el("rLoad"), rShare = el("rShare");
   const stall = el("stall"), bPause = el("bPause");
 
@@ -697,30 +756,44 @@
     vXo.textContent = motor.x.toFixed(2);
     vYo.textContent = motor.y.toFixed(2);
     vEo.textContent = `${opt.explode} mm`;
+    vAo.textContent = `${opt.altHz.toFixed(1)} Hz`;
     rXo.textContent = rpm("x").toFixed(0);
     rYo.textContent = rpm("y").toFixed(0);
     rWave.textContent = `${(WAVELENGTH * Math.max(rpm("x"), rpm("y")) / 60).toFixed(0)} mm/s`;
 
     const running = (motor.x !== 0) + (motor.y !== 0);
-    const bad = !opt.retract && running === 1;
-    stall.hidden = !bad;
-    if (bad) {
-      stall.textContent = "停止軸の歯が支持点に残り、動作軸の推力を食っています。損失は止めた角度と荷の位置しだいで 6〜82% と読めません。";
+    if (!opt.retract && running === 1) {
+      stall.hidden = false;
+      stall.textContent = "停止軸の歯が支持点に残り、同じ荷重でブレーキとして効いています。ほぼ完全に失速します。";
+    } else if (!opt.alternate && opt.fullContact && running === 2) {
+      stall.hidden = false;
+      stall.textContent = "全面接地で両ラティスを同時に接地させています。過拘束になり、遅いほうがフルの摩擦力でブレーキとして効くため、進行方向が最大 65° ずれます。時間交替を入れると消えます。";
+    } else {
+      stall.hidden = true;
     }
   }
 
   function readouts() {
     rLoad.textContent = `${loadSpeed.toFixed(0)} mm/s`;
     rShare.textContent = `${Math.round(avgShare * 100)} / ${Math.round((1 - avgShare) * 100)}`;
+
+    const moving = Math.hypot(avgVx, avgVz) > 2;
+    const cmd = (motor.x || motor.y) ? Math.atan2(motor.y, motor.x) * 180 / Math.PI : null;
+    rDir.textContent = `${moving ? Math.round(Math.atan2(avgVz, avgVx) * 180 / Math.PI) + "°" : "—"} / ${cmd === null ? "—" : Math.round(cmd) + "°"}`;
   }
 
   sX.addEventListener("input", () => { motor.x = Number(sX.value); sync(); });
   sY.addEventListener("input", () => { motor.y = Number(sY.value); sync(); });
   sE.addEventListener("input", () => { opt.explode = Number(sE.value); sync(); });
+  sA.addEventListener("input", () => { opt.altHz = Number(sA.value); sync(); });
+  el("cAlt").addEventListener("change", e => { opt.alternate = e.target.checked; sync(); });
+  el("cFull").addEventListener("change", e => { opt.fullContact = e.target.checked; sync(); });
   el("cRetract").addEventListener("change", e => { opt.retract = e.target.checked; sync(); });
   el("cMech").addEventListener("change", e => { opt.mech = e.target.checked; });
   el("cEdge").addEventListener("change", e => { opt.edge = e.target.checked; });
-  el("bReset").addEventListener("click", () => { puck.x = 0; puck.z = 0; trail.length = 0; });
+  el("bReset").addEventListener("click", () => {
+    puck.x = 0; puck.z = 0; vel.x = 0; vel.z = 0; trail.length = 0;
+  });
   el("bView").addEventListener("click", () => {
     view.yaw = 0.72;
     view.pitch = 0.58;
