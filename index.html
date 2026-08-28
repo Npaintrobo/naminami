@@ -229,6 +229,60 @@
       line-height: 1.6;
     }
 
+    .hw-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+
+    .toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      cursor: pointer;
+    }
+
+    .toggle input {
+      accent-color: var(--accent);
+    }
+
+    .hw-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+      gap: 10px;
+    }
+
+    .hw-grid label {
+      display: grid;
+      gap: 5px;
+      color: var(--muted);
+      font-size: 0.79rem;
+    }
+
+    .hw-grid input {
+      width: 100%;
+      padding: 6px 8px;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: rgba(2, 9, 19, 0.6);
+      color: var(--text);
+      font-size: 0.92rem;
+    }
+
+    .warn {
+      margin: 10px 0 0;
+      padding: 9px 12px;
+      border-radius: 12px;
+      background: rgba(255, 176, 32, 0.12);
+      border: 1px solid rgba(255, 176, 32, 0.4);
+      color: #ffd894;
+      font-size: 0.82rem;
+      line-height: 1.55;
+    }
+
     canvas {
       display: block;
       width: 100%;
@@ -344,11 +398,28 @@
             </div>
           </div>
         </div>
+        <div class="control-card wide">
+          <p class="control-title">実機近似モード（直交インターリーブ・オービタルレール）</p>
+          <div class="hw-head">
+            <label class="toggle"><input type="checkbox" id="hwToggle"> 実機の機構で表示する</label>
+            <label class="toggle"><input type="checkbox" id="hwRetract" checked> 停止軸をリトラクト（退避）させる</label>
+          </div>
+          <div class="hw-grid">
+            <label>レール本数 / 軸<input type="number" id="hwRails" min="6" max="20" step="1" value="12"></label>
+            <label>ピッチ p [mm]<input type="number" id="hwPitch" min="20" max="100" step="5" value="50"></label>
+            <label>位相ステップ Δφ [°]<input type="number" id="hwPhase" min="15" max="120" step="15" value="60"></label>
+            <label>クランク半径 r [mm]<input type="number" id="hwCrank" min="2" max="20" step="0.5" value="6"></label>
+            <label>最大回転数 [rpm]<input type="number" id="hwRpm" min="30" max="900" step="10" value="300"></label>
+            <label>伝達効率 η<input type="number" id="hwGrip" min="0.1" max="1" step="0.05" value="0.55"></label>
+          </div>
+          <p class="summary-sub" id="hwReadout">実機モードで諸元を表示します。</p>
+          <p class="warn" id="hwWarn" hidden></p>
+        </div>
       </section>
       <canvas id="wave" width="960" height="540" aria-label="波シミュレーション"></canvas>
       <div class="hud">
         <div class="chip">操作: X/Yモータを切替</div>
-        <div class="chip">原理: X波 + Y波 の高さ合成</div>
+        <div class="chip" id="hudPrinciple">原理: X波 + Y波 の高さ合成</div>
       </div>
     </section>
   </main>
@@ -461,6 +532,7 @@
       resultDetail.textContent = `X: ${motorLabel(motorVelocity.x, "x")} ${Math.abs(motorVelocity.x).toFixed(2)} / Y: ${motorLabel(motorVelocity.y, "y")} ${Math.abs(motorVelocity.y).toFixed(2)}`;
       joystickReadout.textContent = `X: ${motorLabel(motorVelocity.x, "x")} ${Math.abs(motorVelocity.x).toFixed(2)} / Y: ${motorLabel(motorVelocity.y, "y")} ${Math.abs(motorVelocity.y).toFixed(2)}`;
       updateJoystickKnob();
+      updateHardwareReadout();
     }
 
     function updateJoystickKnob() {
@@ -602,11 +674,364 @@
       ctx.restore();
     }
 
+
+    /* ------------------------------------------------------------------
+       実機近似: 直交インターリーブ・オービタルレール (docs/hardware-approximation.md 案A)
+
+       各レールは専用のクランク軸に平行支持され、全点が半径 r の円軌道を描く。
+       X歯とY歯は市松に置かれてぶつからないので、高さは「加算」ではなく
+       「その瞬間に高い方が荷を拾う (max 合成)」になる。
+       ------------------------------------------------------------------ */
+    const DEG = Math.PI / 180;
+
+    const hw = {
+      enabled: false,
+      rails: 12,
+      pitch: 50,
+      phaseStep: 60,
+      crank: 6,
+      maxRpm: 300,
+      grip: 0.55,
+      retract: true
+    };
+
+    const railPhase = { x: 0, y: 0 };
+    const puck = { x: 300, y: 300, trail: [] };
+    const carry = { shareX: 0.5, vx: 0, vy: 0 };
+
+    const hwToggle = document.getElementById("hwToggle");
+    const hwRetract = document.getElementById("hwRetract");
+    const hwRails = document.getElementById("hwRails");
+    const hwPitch = document.getElementById("hwPitch");
+    const hwPhase = document.getElementById("hwPhase");
+    const hwCrank = document.getElementById("hwCrank");
+    const hwRpm = document.getElementById("hwRpm");
+    const hwGrip = document.getElementById("hwGrip");
+    const hwReadout = document.getElementById("hwReadout");
+    const hwWarn = document.getElementById("hwWarn");
+    const hudPrinciple = document.getElementById("hudPrinciple");
+
+    function tableSize() {
+      return hw.rails * hw.pitch;
+    }
+
+    function wavelength() {
+      return (360 / hw.phaseStep) * hw.pitch;
+    }
+
+    function rpmFor(axis) {
+      return Math.abs(motorVelocity[axis]) / 3 * hw.maxRpm;
+    }
+
+    /* 符号付き角速度 [rad/s]。スライダ ±3 が ±maxRpm に対応する。 */
+    function omegaFor(axis) {
+      return motorVelocity[axis] / 3 * hw.maxRpm * Math.PI / 30;
+    }
+
+    /* 停止軸はサーボで 2r 下げて接触から外す (対策1)。 */
+    function railOffset(axis) {
+      return hw.retract && motorVelocity[axis] === 0 ? -2 * hw.crank : 0;
+    }
+
+    function heightX(i) {
+      return hw.crank * Math.cos(i * hw.phaseStep * DEG - railPhase.x) + railOffset("x");
+    }
+
+    function heightY(j) {
+      return hw.crank * Math.cos(j * hw.phaseStep * DEG - railPhase.y) + railOffset("y");
+    }
+
+    function contactReach() {
+      return hw.pitch * 1.25;
+    }
+
+    function centerPuck() {
+      puck.x = tableSize() / 2;
+      puck.y = tableSize() / 2;
+      puck.trail.length = 0;
+    }
+
+    /* 歯先パッドのつぶれ量 [mm]。この深さまで沈み込んだ歯が荷重を分け合う。 */
+    function contactCompliance() {
+      return 0.25 * hw.crank;
+    }
+
+    const contactsX = [];
+    const contactsY = [];
+
+    /* 荷の下にある列を [被覆率, 高さ, ...] の形で集め、最高点を返す。
+       被覆率は荷がその列をどれだけ覆っているか (0..1)。端にかかる歯は荷重を受けにくい。 */
+    function gatherContacts(axis, out) {
+      const reach = contactReach();
+      const feather = hw.pitch * 0.5;
+      const center = axis === "x" ? puck.x : puck.y;
+      let top = -1e6;
+
+      out.length = 0;
+
+      for (let i = 0; i < hw.rails; i += 1) {
+        const gap = Math.abs((i + 0.5) * hw.pitch - center);
+
+        if (gap > reach) {
+          continue;
+        }
+
+        const coverage = clamp((reach - gap) / feather, 0, 1);
+
+        if (coverage <= 0) {
+          continue;
+        }
+
+        const height = axis === "x" ? heightX(i) : heightY(i);
+        out.push(coverage, height);
+        top = Math.max(top, height);
+      }
+
+      return top;
+    }
+
+    /* 荷の底面を plane まで沈めたとき、その組の歯が受け持つ垂直荷重。 */
+    function pressedLoad(contacts, plane) {
+      let load = 0;
+
+      for (let n = 0; n < contacts.length; n += 2) {
+        const bite = contacts[n + 1] - plane;
+
+        if (bite > 0) {
+          load += contacts[n] * bite;
+        }
+      }
+
+      return load;
+    }
+
+    function advanceHardware(dt) {
+      railPhase.x += omegaFor("x") * dt;
+      railPhase.y += omegaFor("y") * dt;
+
+      /* 荷は両方のラティスの多数の歯に同時に乗る。最高点だけで勝敗を決めると
+         両軸同速のとき片方に張り付くので、沈み込み量から荷重分担を出して按分する。
+         牽引力は分担荷重に比例する（摩擦律速）。 */
+      const topX = gatherContacts("x", contactsX);
+      const topY = gatherContacts("y", contactsY);
+      const plane = Math.max(topX, topY) - contactCompliance();
+      const loadX = pressedLoad(contactsX, plane);
+      const loadY = pressedLoad(contactsY, plane);
+      const total = loadX + loadY;
+      const shareX = total > 0 ? loadX / total : 0.5;
+
+      const vx = hw.grip * hw.crank * omegaFor("x") * shareX;
+      const vy = hw.grip * hw.crank * omegaFor("y") * (1 - shareX);
+
+      const reach = contactReach();
+      const limit = Math.max(reach, tableSize() - reach);
+      puck.x = clamp(puck.x + vx * dt, reach, limit);
+      puck.y = clamp(puck.y + vy * dt, reach, limit);
+      carry.shareX = shareX;
+      carry.vx = vx;
+      carry.vy = vy;
+    }
+
+    function stepHardware(dt) {
+      /* 山のリップルは軸回転の6倍の周波数で振れる。60 fps のまま解くと
+         エイリアシングで分担が偏るので、位相 2 度きざみに細分する。 */
+      const fastest = Math.max(Math.abs(omegaFor("x")), Math.abs(omegaFor("y")));
+      const steps = clamp(Math.ceil(fastest * dt / 0.035), 1, 96);
+      const slice = dt / steps;
+
+      for (let step = 0; step < steps; step += 1) {
+        advanceHardware(slice);
+      }
+
+      const last = puck.trail[puck.trail.length - 1];
+      if (!last || Math.hypot(last.x - puck.x, last.y - puck.y) > hw.pitch * 0.06) {
+        puck.trail.push({ x: puck.x, y: puck.y });
+        if (puck.trail.length > 420) {
+          puck.trail.shift();
+        }
+      }
+    }
+
+    function hardwareViewport() {
+      const headroom = 26;
+      const span = Math.min(canvas.width, canvas.height - headroom) - 20;
+      return {
+        size: span,
+        ox: (canvas.width - span) / 2,
+        oy: headroom + (canvas.height - headroom - span) / 2,
+        s: span / tableSize()
+      };
+    }
+
+    function drawTooth(view, mmX, mmY, height, round, dimmed) {
+      const norm = clamp(height / hw.crank, -1, 1);
+      const [r, g, b] = colorForHeight(norm);
+      const base = hw.pitch * 0.34 * view.s;
+      const grow = 0.72 + 0.5 * (norm * 0.5 + 0.5);
+      const rise = -norm * hw.pitch * 0.16 * view.s;
+      const px = view.ox + mmX * view.s;
+      const py = view.oy + mmY * view.s;
+
+      ctx.globalAlpha = dimmed ? 0.28 : 1;
+
+      ctx.fillStyle = "rgba(0, 0, 0, 0.45)";
+      ctx.beginPath();
+      ctx.ellipse(px, py + base * 0.28, base * 0.5, base * 0.24, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+      if (round) {
+        ctx.beginPath();
+        ctx.arc(px, py + rise, base * grow * 0.5, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        const side = base * grow;
+        ctx.fillRect(px - side / 2, py + rise - side / 2, side, side);
+      }
+
+      ctx.globalAlpha = 1;
+    }
+
+    function renderHardware() {
+      const view = hardwareViewport();
+      const dimX = hw.retract && motorVelocity.x === 0;
+      const dimY = hw.retract && motorVelocity.y === 0;
+
+      ctx.fillStyle = "#020913";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      ctx.fillStyle = "rgba(255, 255, 255, 0.04)";
+      ctx.fillRect(view.ox, view.oy, view.size, view.size);
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.16)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(view.ox, view.oy, view.size, view.size);
+
+      ctx.fillStyle = "rgba(159, 192, 214, 0.85)";
+      ctx.font = '13px "Yu Gothic UI", sans-serif';
+      ctx.fillText(`□ Xラティス   ○ Yラティス   盤面 ${tableSize()} mm角`, view.ox, view.oy - 8);
+
+      /* Xラティス: 四角い歯。列 i の全歯が同じ高さ = レール1本ぶん。 */
+      for (let i = 0; i < hw.rails; i += 1) {
+        const h = heightX(i);
+        for (let j = 0; j < hw.rails - 1; j += 1) {
+          drawTooth(view, (i + 0.5) * hw.pitch, (j + 1) * hw.pitch, h, false, dimX);
+        }
+      }
+
+      /* Yラティス: 丸い歯。(p/2, p/2) ずらしてあるので干渉しない。 */
+      for (let j = 0; j < hw.rails; j += 1) {
+        const h = heightY(j);
+        for (let i = 0; i < hw.rails - 1; i += 1) {
+          drawTooth(view, (i + 1) * hw.pitch, (j + 0.5) * hw.pitch, h, true, dimY);
+        }
+      }
+
+      if (puck.trail.length > 1) {
+        ctx.strokeStyle = "rgba(255, 255, 255, 0.34)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        puck.trail.forEach((point, index) => {
+          const px = view.ox + point.x * view.s;
+          const py = view.oy + point.y * view.s;
+          if (index === 0) {
+            ctx.moveTo(px, py);
+          } else {
+            ctx.lineTo(px, py);
+          }
+        });
+        ctx.stroke();
+      }
+
+      const puckSide = hw.pitch * 2.5 * view.s;
+      const cx = view.ox + puck.x * view.s;
+      const cy = view.oy + puck.y * view.s;
+
+      ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+      ctx.strokeStyle = "rgba(2, 9, 19, 0.9)";
+      ctx.lineWidth = 2;
+      ctx.fillRect(cx - puckSide / 2, cy - puckSide / 2, puckSide, puckSide);
+      ctx.strokeRect(cx - puckSide / 2, cy - puckSide / 2, puckSide, puckSide);
+
+      /* 荷が受けている垂直荷重の分担率。牽引力はこの比で按分される。 */
+      ctx.font = '13px "Yu Gothic UI", sans-serif';
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(2, 9, 19, 0.9)";
+      const share = `荷重 X ${Math.round(carry.shareX * 100)}% ・ Y ${Math.round((1 - carry.shareX) * 100)}%`;
+      ctx.strokeText(share, cx, cy - puckSide / 2 - 6);
+      ctx.fillStyle = "#eaf7ff";
+      ctx.fillText(share, cx, cy - puckSide / 2 - 6);
+      ctx.textAlign = "start";
+      ctx.textBaseline = "alphabetic";
+    }
+
+    function updateHardwareReadout() {
+      if (!hwReadout) {
+        return;
+      }
+
+      const lam = wavelength();
+      const runX = motorVelocity.x !== 0;
+      const runY = motorVelocity.y !== 0;
+      const soloDuty = hw.retract ? 1 : 0.5;
+      const dutyX = runX ? (runY ? 0.5 : soloDuty) : 0;
+      const dutyY = runY ? (runX ? 0.5 : soloDuty) : 0;
+      const loadX = hw.grip * hw.crank * Math.abs(omegaFor("x")) * dutyX;
+      const loadY = hw.grip * hw.crank * Math.abs(omegaFor("y")) * dutyY;
+
+      hwReadout.textContent =
+        `盤面 ${tableSize()} mm角 / 波長 λ=${lam.toFixed(0)} mm / ストローク ${(2 * hw.crank).toFixed(1)} mm｜` +
+        `X: ${rpmFor("x").toFixed(0)} rpm・波速 ${(lam * rpmFor("x") / 60).toFixed(0)} mm/s・搬送 ${loadX.toFixed(0)} mm/s｜` +
+        `Y: ${rpmFor("y").toFixed(0)} rpm・波速 ${(lam * rpmFor("y") / 60).toFixed(0)} mm/s・搬送 ${loadY.toFixed(0)} mm/s`;
+
+      const stalling = hw.enabled && !hw.retract && runX !== runY;
+      hwWarn.hidden = !stalling;
+      if (stalling) {
+        hwWarn.textContent =
+          "停止軸の歯が支持点に残り、動作軸の推力を食っています。" +
+          "損失はその軸が止まった角度と荷の位置しだいで 6〜82% と読めません。" +
+          "リトラクト機構を入れるか、両軸を常時回して速度比で操舵してください。";
+      }
+    }
+
+    function applyHardwareInputs() {
+      hw.rails = clamp(Math.round(Number(hwRails.value) || 12), 6, 20);
+      hw.pitch = clamp(Number(hwPitch.value) || 50, 20, 100);
+      hw.phaseStep = clamp(Number(hwPhase.value) || 60, 15, 120);
+      hw.crank = clamp(Number(hwCrank.value) || 6, 2, 20);
+      hw.maxRpm = clamp(Number(hwRpm.value) || 300, 30, 900);
+      hw.grip = clamp(Number(hwGrip.value) || 0.55, 0.1, 1);
+      hw.retract = hwRetract.checked;
+      centerPuck();
+      updateHardwareReadout();
+    }
+
+    function setHardwareMode(enabled) {
+      hw.enabled = enabled;
+      hudPrinciple.textContent = enabled
+        ? "原理: 市松インターリーブ + 円軌道による進行波搬送"
+        : "原理: X波 + Y波 の高さ合成";
+      centerPuck();
+      updateHardwareReadout();
+    }
+
+    let previousTime = 0;
+
     function frame(time) {
-      update(time);
-      render();
-      updateProbe();
-      drawOverlay();
+      const dt = previousTime ? Math.min(0.05, (time - previousTime) / 1000) : 0;
+      previousTime = time;
+
+      if (hw.enabled) {
+        stepHardware(dt);
+        renderHardware();
+      } else {
+        update(time);
+        render();
+        updateProbe();
+        drawOverlay();
+      }
+
       requestAnimationFrame(frame);
     }
 
@@ -653,7 +1078,15 @@
 
     window.addEventListener("resize", resizeCanvas);
 
+    hwToggle.addEventListener("change", () => setHardwareMode(hwToggle.checked));
+
+    [hwRails, hwPitch, hwPhase, hwCrank, hwRpm, hwGrip, hwRetract].forEach((input) => {
+      input.addEventListener("change", applyHardwareInputs);
+    });
+
     resizeCanvas();
+    applyHardwareInputs();
+    setHardwareMode(hwToggle.checked);
     syncJoystickFromState();
     syncControls();
     requestAnimationFrame(frame);
