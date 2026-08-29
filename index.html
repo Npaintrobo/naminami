@@ -410,7 +410,8 @@
             <label>位相ステップ Δφ [°]<input type="number" id="hwPhase" min="15" max="120" step="15" value="60"></label>
             <label>クランク半径 r [mm]<input type="number" id="hwCrank" min="2" max="20" step="0.5" value="6"></label>
             <label>最大回転数 [rpm]<input type="number" id="hwRpm" min="30" max="900" step="10" value="300"></label>
-            <label>伝達効率 η<input type="number" id="hwGrip" min="0.1" max="1" step="0.05" value="0.55"></label>
+            <label>摩擦係数 μ<input type="number" id="hwGrip" min="0.05" max="2" step="0.05" value="0.6"></label>
+            <label>沈み込み δp<input type="number" id="hwSquash" min="0.05" max="3" step="0.05" value="0.3"></label>
           </div>
           <p class="summary-sub" id="hwReadout">実機モードで諸元を表示します。</p>
           <p class="warn" id="hwWarn" hidden></p>
@@ -691,9 +692,13 @@
       phaseStep: 60,
       crank: 6,
       maxRpm: 300,
-      grip: 0.55,
+      mu: 0.6,
+      squash: 0.3,
       retract: true
     };
+
+    const GRAV = 9810;      /* mm/s^2 */
+    const VEPS = 6;         /* クーロン摩擦を正則化する滑り速度 [mm/s] */
 
     const railPhase = { x: 0, y: 0 };
     const puck = { x: 300, y: 300, trail: [] };
@@ -701,6 +706,7 @@
 
     const hwToggle = document.getElementById("hwToggle");
     const hwRetract = document.getElementById("hwRetract");
+    const hwSquash = document.getElementById("hwSquash");
     const hwRails = document.getElementById("hwRails");
     const hwPitch = document.getElementById("hwPitch");
     const hwPhase = document.getElementById("hwPhase");
@@ -762,8 +768,12 @@
     }
 
     /* 歯先パッドのつぶれ量 [mm]。この深さまで沈み込んだ歯が荷重を分け合う。 */
+    /* パッドの沈み込み δp [mm]。接地とみなす高さの幅を決める。
+       ここは実測されていない最大の未知数で、操舵誤差はこの値だけで 1°〜25° 動く
+       （bench/table.mjs のδpスイープ）。以前は 0.25·クランク＝1.5mm に固定していたが、
+       根拠のない値だったので明示パラメータにした。 */
     function contactCompliance() {
-      return 0.25 * hw.crank;
+      return hw.squash;
     }
 
     const contactsX = [];
@@ -794,7 +804,10 @@
         }
 
         const height = axis === "x" ? heightX(i) : heightY(i);
-        out.push(coverage, height);
+        /* 歯先の水平速度。sway = -r·sin(u), u = i·Δφ - railPhase なので d(sway)/dt = r·ω·cos(u)。
+           山（u=0）でちょうど r·ω になる。 */
+        const tip = hw.crank * omegaFor(axis) * Math.cos(i * hw.phaseStep * DEG - railPhase[axis]);
+        out.push(coverage, height, tip);
         top = Math.max(top, height);
       }
 
@@ -805,7 +818,7 @@
     function pressedLoad(contacts, plane) {
       let load = 0;
 
-      for (let n = 0; n < contacts.length; n += 2) {
+      for (let n = 0; n < contacts.length; n += 3) {
         const bite = contacts[n + 1] - plane;
 
         if (bite > 0) {
@@ -820,34 +833,101 @@
       railPhase.x += omegaFor("x") * dt;
       railPhase.y += omegaFor("y") * dt;
 
-      /* 荷は両方のラティスの多数の歯に同時に乗る。最高点だけで勝敗を決めると
-         両軸同速のとき片方に張り付くので、沈み込み量から荷重分担を出して按分する。
-         牽引力は分担荷重に比例する（摩擦律速）。 */
+      /* 荷は両方のラティスの多数の歯に同時に乗る。沈み込み量から各歯の垂直荷重を出し、
+         その荷重で重み付けしたクーロン摩擦の合力で荷を加速させる。
+
+         「効率 η を掛けて速度を直接決める」形は使わない。X歯は vx=r·ωx かつ vy=0 を、
+         Y歯は vy=r·ωy かつ vx=0 を要求する過拘束なので、必ずどちらかが滑る。
+         クーロン摩擦は滑り速度に依らないため、遅いほうがフルの摩擦力でブレーキになる。
+         この「負けた側のブレーキ」が η モデルには入っていなかった。 */
       const topX = gatherContacts("x", contactsX);
       const topY = gatherContacts("y", contactsY);
       const plane = Math.max(topX, topY) - contactCompliance();
       const loadX = pressedLoad(contactsX, plane);
       const loadY = pressedLoad(contactsY, plane);
       const total = loadX + loadY;
-      const shareX = total > 0 ? loadX / total : 0.5;
 
-      const vx = hw.grip * hw.crank * omegaFor("x") * shareX;
-      const vy = hw.grip * hw.crank * omegaFor("y") * (1 - shareX);
+      if (total > 0) {
+        const shareX = loadX / total;
+        let ax = 0;
+        let ay = 0;
+
+        for (const [contacts, along] of [[contactsX, "x"], [contactsY, "y"]]) {
+          for (let n = 0; n < contacts.length; n += 3) {
+            const bite = contacts[n + 1] - plane;
+
+            if (bite <= 0) {
+              continue;
+            }
+
+            /* 滑り速度 = 荷の速度 − 歯先の速度。歯は自分の軸方向にしか動かない。 */
+            const gx = carry.vx - (along === "x" ? contacts[n + 2] : 0);
+            const gy = carry.vy - (along === "y" ? contacts[n + 2] : 0);
+            const mag = Math.max(Math.hypot(gx, gy), VEPS);
+            const share = (contacts[n] * bite) / total;
+
+            ax -= hw.mu * GRAV * share * gx / mag;
+            ay -= hw.mu * GRAV * share * gy / mag;
+          }
+        }
+
+        carry.vx += ax * dt;
+        carry.vy += ay * dt;
+        carry.shareX = shareX;
+      } else {
+        carry.vx = 0;
+        carry.vy = 0;
+      }
 
       const reach = contactReach();
       const limit = Math.max(reach, tableSize() - reach);
-      puck.x = clamp(puck.x + vx * dt, reach, limit);
-      puck.y = clamp(puck.y + vy * dt, reach, limit);
-      carry.shareX = shareX;
-      carry.vx = vx;
-      carry.vy = vy;
+      const nx = clamp(puck.x + carry.vx * dt, reach, limit);
+      const ny = clamp(puck.y + carry.vy * dt, reach, limit);
+
+      /* 端で止まったら速度も落とす。残したままだと読み出しが実態と合わなくなる。 */
+      if (nx === reach || nx === limit) {
+        carry.vx = 0;
+      }
+      if (ny === reach || ny === limit) {
+        carry.vy = 0;
+      }
+
+      puck.x = nx;
+      puck.y = ny;
     }
+
+    /* ヘッドレス計測用の口（bench/table.mjs が使う）。UI からは触らない。 */
+    window.__probe = {
+      reset(mu, retract) {
+        hw.enabled = true;
+        hw.mu = mu;
+        hw.retract = retract;
+        railPhase.x = 0;
+        railPhase.y = 0;
+        puck.x = tableSize() / 2;
+        puck.y = tableSize() / 2;
+        puck.trail.length = 0;
+        carry.vx = 0;
+        carry.vy = 0;
+        carry.shareX = 0.5;
+      },
+      setMotor(x, y) { motorVelocity.x = x; motorVelocity.y = y; },
+      setSquash(v) { hw.squash = v; },
+      step(dt) { stepHardware(dt); },
+      puck() { return { x: puck.x, y: puck.y }; },
+      vel() { return { x: carry.vx, y: carry.vy }; },
+      /* 比較の基準はフルスケール（maxRpm）での歯先速度 r·ω。 */
+      tip() { return hw.crank * hw.maxRpm * Math.PI / 30; }
+    };
 
     function stepHardware(dt) {
       /* 山のリップルは軸回転の6倍の周波数で振れる。60 fps のまま解くと
          エイリアシングで分担が偏るので、位相 2 度きざみに細分する。 */
       const fastest = Math.max(Math.abs(omegaFor("x")), Math.abs(omegaFor("y")));
-      const steps = clamp(Math.ceil(fastest * dt / 0.035), 1, 96);
+      /* 位相の細かさに加えて、摩擦の正則化帯 VEPS/(μg) より十分細かく刻む。
+         これを割ると正則化バンドを1ステップで飛び越えて発振する。 */
+      const band = VEPS / (hw.mu * GRAV) * 0.25;
+      const steps = clamp(Math.max(Math.ceil(fastest * dt / 0.035), Math.ceil(dt / band)), 1, 256);
       const slice = dt / steps;
 
       for (let step = 0; step < steps; step += 1) {
@@ -987,16 +1067,19 @@
       const lam = wavelength();
       const runX = motorVelocity.x !== 0;
       const runY = motorVelocity.y !== 0;
-      const soloDuty = hw.retract ? 1 : 0.5;
-      const dutyX = runX ? (runY ? 0.5 : soloDuty) : 0;
-      const dutyY = runY ? (runX ? 0.5 : soloDuty) : 0;
-      const loadX = hw.grip * hw.crank * Math.abs(omegaFor("x")) * dutyX;
-      const loadY = hw.grip * hw.crank * Math.abs(omegaFor("y")) * dutyY;
+      void runX;
+      void runY;
+
+      /* 搬送速度は式で見積もらず、いま解いている荷の速度をそのまま出す。 */
+      const tip = hw.crank * Math.max(Math.abs(omegaFor("x")), Math.abs(omegaFor("y")));
+      const carried = Math.hypot(carry.vx, carry.vy);
+      const ratio = tip > 0 ? carried / tip : 0;
 
       hwReadout.textContent =
-        `盤面 ${tableSize()} mm角 / 波長 λ=${lam.toFixed(0)} mm / ストローク ${(2 * hw.crank).toFixed(1)} mm｜` +
-        `X: ${rpmFor("x").toFixed(0)} rpm・波速 ${(lam * rpmFor("x") / 60).toFixed(0)} mm/s・搬送 ${loadX.toFixed(0)} mm/s｜` +
-        `Y: ${rpmFor("y").toFixed(0)} rpm・波速 ${(lam * rpmFor("y") / 60).toFixed(0)} mm/s・搬送 ${loadY.toFixed(0)} mm/s`;
+        `盤面 ${tableSize()} mm角 / 波長 λ=${lam.toFixed(0)} mm / ストローク ${(2 * hw.crank).toFixed(1)} mm / 歯先 r·ω=${tip.toFixed(0)} mm/s｜` +
+        `X: ${rpmFor("x").toFixed(0)} rpm・波速 ${(lam * rpmFor("x") / 60).toFixed(0)} mm/s｜` +
+        `Y: ${rpmFor("y").toFixed(0)} rpm・波速 ${(lam * rpmFor("y") / 60).toFixed(0)} mm/s｜` +
+        `荷 ${carried.toFixed(0)} mm/s (r·ω比 ${(ratio * 100).toFixed(0)}%)`;
 
       const stalling = hw.enabled && !hw.retract && runX !== runY;
       hwWarn.hidden = !stalling;
@@ -1014,7 +1097,8 @@
       hw.phaseStep = clamp(Number(hwPhase.value) || 60, 15, 120);
       hw.crank = clamp(Number(hwCrank.value) || 6, 2, 20);
       hw.maxRpm = clamp(Number(hwRpm.value) || 300, 30, 900);
-      hw.grip = clamp(Number(hwGrip.value) || 0.55, 0.1, 1);
+      hw.mu = clamp(Number(hwGrip.value) || 0.6, 0.05, 2);
+      hw.squash = clamp(Number(hwSquash.value) || 0.3, 0.05, 3);
       hw.retract = hwRetract.checked;
       centerPuck();
       updateHardwareReadout();
@@ -1093,7 +1177,7 @@
 
     hwToggle.addEventListener("change", () => setHardwareMode(hwToggle.checked));
 
-    [hwRails, hwPitch, hwPhase, hwCrank, hwRpm, hwGrip, hwRetract].forEach((input) => {
+    [hwRails, hwPitch, hwPhase, hwCrank, hwRpm, hwGrip, hwSquash, hwRetract].forEach((input) => {
       input.addEventListener("change", applyHardwareInputs);
     });
 

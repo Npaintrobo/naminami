@@ -9,7 +9,14 @@
 //   張り出し   e = R·cos(α+β)      接地している瞬間の、ピン軸から接地点までの水平距離
 //   掃引速度   v ≈ 0.9·R·ω
 //   制約       β < α               満たさないと接地点が一周せず、全方位へ向けられない
-//              e < ピッチ/2         隣の足とぶつからない
+//
+// ピッチの下限は「接地している瞬間の張り出し」では決まりません。離地中も円盤は回り続けていて、
+// 干渉判定に要るのは1回転ぶんの掃引体積の外形（envelope）＝縁の全点・全回転角での最大水平半径です。
+//
+// これは解析的に必ず R になります。どんな傾きでも、円盤面と水平面の交線（節線）上にある
+// 縁の2点は水平面内にあり、中心からの水平距離はちょうど R だからです。α, β には依りません。
+// したがって安全側のピッチ下限は 2R。これより詰めるなら、隣接ユニットの位相差に依存する
+// 対ごとの掃引体積干渉と、軸・ハウジング・支持部材まで含めた検査が要ります（本ファイル未対応）。
 //
 // 操舵はハウジングを鉛直まわりに φ 回すだけ。全ユニットで同じ φ なら接地点の
 // オフセットも同一方向に動くので、パッチ全体を回すことにならず、スクラブが出ない。
@@ -46,7 +53,21 @@ export function foot({ R = 30, alphaDeg = 30, betaDeg = 25, phiDeg = 0, rpm = 30
     const g = Math.acos(Math.max(-1, Math.min(1, dot(n, UP))));      // 鉛直との角
     const down = scal(norm(sub(UP, scal(n, dot(UP, n)))), -1);        // 円盤面内で最も下る向き
     const L = scal(down, R);                                         // 最下点（円盤中心が原点）
-    rows.push({ depth: R * Math.sin(g), L, v: scal(cross(p, L), w) });
+    rows.push({ depth: R * Math.sin(g), L, v: scal(cross(p, L), w), reach: Math.hypot(L[0], L[2]) });
+  }
+
+  /* 掃引体積の外形: 縁の全点を全回転角で見たときの、ピン軸まわりの最大水平半径。 */
+  let envelope = 0;
+  for (let i = 0; i < steps; i += 1) {
+    const n = rot(n0, p, i / steps * 2 * Math.PI);
+    const e1 = norm(cross(n, Math.abs(n[1]) > 0.9 ? [1, 0, 0] : UP));
+    const e2 = cross(n, e1);
+    for (let u = 0; u < 180; u += 1) {
+      const a2 = u / 180 * 2 * Math.PI, c = Math.cos(a2) * R, s2 = Math.sin(a2) * R;
+      const x = e1[0] * c + e2[0] * s2, z = e1[2] * c + e2[2] * s2;
+      const h = Math.hypot(x, z);
+      if (h > envelope) envelope = h;
+    }
   }
 
   const dmax = Math.max(...rows.map(r => r.depth));
@@ -67,17 +88,19 @@ export function foot({ R = 30, alphaDeg = 30, betaDeg = 25, phiDeg = 0, rpm = 30
     duty: win.length / steps,
     sweep: mean,
     slip: sl / Math.max(mean, 1e-9),
-    reach: Math.hypot(win[0].L[0], win[0].L[2]),
+    reach: Math.max(...win.map(r => r.reach)),        // 接地窓の中での最大張り出し
+    reachAll: Math.max(...rows.map(r => r.reach)),    // 1回転での接地点の最大張り出し
+    envelope,                                          // 円盤そのものの掃引外形半径
     dir: Math.atan2(sz, sx) * 180 / Math.PI
   };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   console.log('■ α と β の選び方（R=30mm, 300rpm, 沈み込み 0.3mm）');
-  console.log('  α    β    ストローク  接地率  掃引速度   滑り   張り出し e');
+  console.log('  α    β    ストローク  接地率  掃引速度   滑り   接地窓e   掃引外形');
   for (const [al, be] of [[15,5],[15,10],[20,10],[20,15],[30,20],[30,25]]) {
     const r = foot({ alphaDeg: al, betaDeg: be });
-    console.log(`  ${String(al).padStart(2)}°  ${String(be).padStart(2)}°   ${r.stroke.toFixed(1).padStart(5)} mm  ${(r.duty*100).toFixed(0).padStart(4)}%  ${r.sweep.toFixed(0).padStart(5)} mm/s  ${(r.slip*100).toFixed(0).padStart(3)}%   ${r.reach.toFixed(0)} mm`);
+    console.log(`  ${String(al).padStart(2)}°  ${String(be).padStart(2)}°   ${r.stroke.toFixed(1).padStart(5)} mm  ${(r.duty*100).toFixed(0).padStart(4)}%  ${r.sweep.toFixed(0).padStart(5)} mm/s  ${(r.slip*100).toFixed(0).padStart(3)}%  ${r.reach.toFixed(1).padStart(5)} mm  ${r.envelope.toFixed(1).padStart(5)} mm`);
   }
   console.log('  → β を α に近づけるほどストロークが増えて滑りが減る（深さプロファイルが尖る）。');
   console.log('    かわりに張り出し e が縮むので掃引速度は落ちる。推奨は α=30°, β=25°。\n');
@@ -105,6 +128,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   console.log('■ 推奨仕様（R=30mm, α=30°, β=25°, 300rpm, 沈み込み 0.3mm）');
   const r = foot();
   console.log(`  ストローク ${r.stroke.toFixed(0)} mm / 掃引速度 ${r.sweep.toFixed(0)} mm/s / 滑り ${(r.slip*100).toFixed(0)}%`);
-  console.log(`  張り出し ${r.reach.toFixed(0)} mm → 足のピッチは ${(2*r.reach).toFixed(0)} mm 以上、実用上は 40 mm`);
+  console.log(`  接地窓での張り出し ${r.reach.toFixed(1)} mm / 1回転での接地点の張り出し ${r.reachAll.toFixed(1)} mm`);
+  console.log(`  掃引体積の外形 ${r.envelope.toFixed(1)} mm（= R。傾きに依らない）`);
+  console.log(`  → 足のピッチは 2R = ${(2*r.envelope).toFixed(0)} mm 以上。`);
+  console.log(`    以前ここに書いていた「実用上 40 mm」は誤りでした。接地窓の張り出し ${r.reach.toFixed(1)} mm`);
+  console.log(`    だけを見ていて、離地中に円盤が水平へ寝るぶんを数えていませんでした。`);
+  console.log(`    40 mm に詰めたいなら R=20mm へ落とすことになり、掃引速度は 2/3 になります。`);
   console.log(`  接地率 ${(r.duty*100).toFixed(0)}% → 安定支持には 25〜36 個`);
 }
