@@ -174,6 +174,12 @@
 
   .note[hidden] { display: none; }
 
+  .note.info {
+    color: var(--muted);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: var(--hair);
+  }
+
   .legend {
     position: fixed;
     right: 20px;
@@ -201,6 +207,10 @@
   }
 
   #bSheet { display: none; }
+
+  .seg.three { grid-template-columns: 1fr 1fr 1fr; }
+  .panel[data-mode="disc"] .only-xy { display: none; }
+  .panel:not([data-mode="disc"]) .only-disc { display: none; }
 </style>
 </head>
 <body>
@@ -229,25 +239,36 @@
     <div class="grp-head"><span>Xモータ</span><b id="vX">2.00</b></div>
     <input type="range" id="sX" min="-3" max="3" step="0.05" value="2">
   </div>
-  <div class="grp ax-y">
+  <div class="grp ax-y only-xy">
     <div class="grp-head"><span>Yモータ</span><b id="vY">1.00</b></div>
     <input type="range" id="sY" min="-3" max="3" step="0.05" value="1">
   </div>
 
-  <div class="grp">
-    <div class="grp-head"><span>接地のさせ方</span></div>
-    <div class="seg">
-      <button id="bShare" aria-pressed="true">荷重分担</button>
-      <button id="bAlt" aria-pressed="false">時間交替</button>
-    </div>
+  <div class="grp only-disc">
+    <div class="grp-head"><span>進行方向 δ（位相差）</span><b id="vD">0°</b></div>
+    <input type="range" id="sD" min="0" max="359" step="1" value="0">
   </div>
 
   <div class="grp">
+    <div class="grp-head"><span>駆動方式</span></div>
+    <div class="seg three">
+      <button id="bShare" aria-pressed="true">荷重分担</button>
+      <button id="bAlt" aria-pressed="false">時間交替</button>
+      <button id="bDisc" aria-pressed="false">傾斜円盤</button>
+    </div>
+  </div>
+
+  <div class="grp only-xy">
     <div class="grp-head"><span>交替周波数<span id="vLim"></span></span><b id="vA">8.0 Hz</b></div>
     <input type="range" id="sA" min="1" max="20" step="0.5" value="8">
   </div>
 
-  <div class="grp">
+  <div class="grp only-disc">
+    <div class="grp-head"><span>円盤の張り出し e / ピッチ</span><b id="vR">0.40</b></div>
+    <input type="range" id="sR" min="0.10" max="0.45" step="0.01" value="0.40">
+  </div>
+
+  <div class="grp only-xy">
     <div class="grp-head"><span>層を分解して見る</span><b id="vE">0 %</b></div>
     <input type="range" id="sE" min="0" max="100" step="1" value="0">
   </div>
@@ -261,7 +282,7 @@
   </div>
 
   <div class="checks">
-    <label class="chk"><input type="checkbox" id="cRetract" checked> 停止軸をリトラクト（退避）</label>
+    <label class="chk only-xy"><input type="checkbox" id="cRetract" checked> 停止軸をリトラクト（退避）</label>
     <label class="chk"><input type="checkbox" id="cMech" checked> クランク軸と偏心ハブを表示</label>
     <label class="chk"><input type="checkbox" id="cEdge" checked> 稜線を描く（面数が多い機体では自動で切れます）</label>
   </div>
@@ -295,6 +316,7 @@
 
   const spec = {};
   const geo = {};
+  const DISC_ALPHA = 15 * Math.PI / 180;   // 円盤の傾き
 
   function usePreset(name) {
     Object.assign(spec, PRESETS[name], { name });
@@ -312,6 +334,10 @@
     geo.chassisTop = geo.chassisBot + 2 * c;
     geo.compliance = 0.25 * c;                  // パッドの沈み込み
     geo.tile = spec.size / 2;                   // 地面の市松のマス目
+
+    // 円盤の接地点はピン軸から e = R·cosα ずれる。隣の足とぶつからないよう e < p/2。
+    spec.discE = opt.discFrac * spec.pitch;
+    spec.discR = spec.discE / Math.cos(DISC_ALPHA);
   }
 
   /* 位置。レール線と、そこから p/2 ずれた歯の市松位置 */
@@ -327,7 +353,8 @@
   const vel = { x: 0, z: 0 };
   const view = { yaw: 0.72, pitch: 0.5, dist: 1400 };
   const opt = { retract: true, mech: true, edge: true, paused: false,
-                alternate: false, altHz: 8, explode: 0 };
+                drive: 'share', altHz: 8, explode: 0,
+                delta: 0, discFrac: 0.40 };
   let altPhase = 0, shareX = 0.5, distance = 0;
   let avgVx = 0, avgVz = 0, avgShare = 0.5;
   let accVx = 0, accVz = 0, accShare = 0, accDt = 0;
@@ -345,7 +372,7 @@
      Y の足は「vz = r·ωy かつ vx = 0」を要求して過拘束になる。
      交互に持ち上げて接地を常に1つに保てばこれが消える。 */
   function altLift(axis) {
-    if (!opt.alternate) return 0;
+    if (opt.drive !== 'alt') return 0;
     const liveX = !(opt.retract && motor.x === 0);
     const liveY = !(opt.retract && motor.y === 0);
     if (!liveX || !liveY) return 0;
@@ -398,7 +425,62 @@
     return load;
   }
 
+  const discBuf = [];
+
+  /* 傾斜円盤式。
+     円盤の最下点はピン軸から水平に e = R·cosα、方位 χ にあり、深さ R·sinα は χ に依らない。
+     ピンの自転をクランクに 1:1 で同期させ、位相差 δ だけずらすと、
+     接地の瞬間（θ=π）の掃引方向が δ だけで決まる。全ての足で同じベクトルなので
+     パッチを回すこともなく、スクラブが出ない。 */
+  function advanceDisc(dt) {
+    phase.x += omega("x") * dt;
+
+    const w = omega("x");
+    const e = spec.discE;
+    let low = 1e6;
+    discBuf.length = 0;
+
+    for (let i = 0; i < spec.rails; i += 1) {
+      const th = i * spec.step - phase.x;
+      const h = spec.crank + spec.crank * Math.cos(th);      // 最下点の高さ
+      const chi = th + opt.delta + Math.PI / 2;              // δ がそのまま進行方位になる向き
+      discBuf.push(h, w * e * Math.sin(chi), -w * e * Math.cos(chi));
+      if (h < low) low = h;
+    }
+
+    car.ride = -low;
+    const plane = low + geo.compliance;
+    let tot = 0;
+    for (let n = 0; n < discBuf.length; n += 3) {
+      const bite = plane - discBuf[n];
+      if (bite > 0) tot += bite;
+    }
+
+    let fx = 0, fz = 0;
+    if (tot > 0) {
+      for (let n = 0; n < discBuf.length; n += 3) {
+        const bite = plane - discBuf[n];
+        if (bite <= 0) continue;
+        const load = bite / tot;
+        const gx = vel.x + discBuf[n + 1], gz = vel.z + discBuf[n + 2];
+        const m = Math.max(Math.hypot(gx, gz), VEPS);
+        fx -= load * gx / m; fz -= load * gz / m;
+      }
+    }
+
+    vel.x += MU_G * fx * dt;
+    vel.z += MU_G * fz * dt;
+    shareX = 1;
+
+    car.x += vel.x * dt;
+    car.z += vel.z * dt;
+    distance += Math.hypot(vel.x, vel.z) * dt;
+    accVx += vel.x * dt; accVz += vel.z * dt; accShare += 1 * dt; accDt += dt;
+  }
+
   function advance(dt) {
+    if (opt.drive === 'disc') { advanceDisc(dt); return; }
+
     phase.x += omega("x") * dt;
     phase.y += omega("y") * dt;
     altPhase += opt.altHz * dt;
@@ -435,7 +517,9 @@
   }
 
   function step(dt) {
-    const fastest = Math.max(Math.abs(omega("x")), Math.abs(omega("y")));
+    const fastest = opt.drive === 'disc'
+      ? Math.abs(omega("x"))
+      : Math.max(Math.abs(omega("x")), Math.abs(omega("y")));
     const n = clamp(Math.ceil(Math.max(fastest * dt / 0.035, dt / 5e-4)), 1, 200);
     for (let s = 0; s < n; s += 1) advance(dt / n);
 
@@ -499,6 +583,7 @@
   const MAT_SHAFT  = material(92, 104, 101);
   const MAT_HUB    = material(140, 152, 148);
   const MAT_CHASSIS = material(58, 68, 66);
+  const MAT_CONTACT = material(238, 246, 243);
   const MAT_TILE_A = material(19, 25, 24);
   const MAT_TILE_B = material(27, 35, 33);
   const RAMP_X = ramp([12, 58, 64], [104, 226, 236]);
@@ -594,6 +679,65 @@
     faceCount += 1;
   }
 
+  const PX = new Float64Array(16), PY = new Float64Array(16);
+
+  /* 傾いた円盤は軸平行の直方体では描けない。凸多角形を三角形扇に割って積む。
+     面バッファは1面4点なので、三角形は最後の点を重ねて詰める。 */
+  function polyFan(pts, n, mat, faceIdx) {
+    let depth = 0, inside = false;
+
+    for (let k = 0; k < n; k += 1) {
+      const dx = pts[k*3] - ex, dy = pts[k*3+1] - ey, dz = pts[k*3+2] - ez;
+      const vz = dx*fx + dy*fy + dz*fz;
+      if (vz < 60) return;
+      const inv = focal / vz;
+      PX[k] = cx + (dx*rx + dy*ry + dz*rz) * inv;
+      PY[k] = cy - (dx*ux + dy*uy + dz*uz) * inv;
+      depth += vz;
+      if (Math.abs(PX[k] - cx) < spanX && Math.abs(PY[k] - cy) < spanY) inside = true;
+    }
+    if (!inside) return;
+    depth /= n;
+
+    for (let k = 1; k < n - 1; k += 1) {
+      if (faceCount >= MAX_FACES) return;
+      const a = Math.abs((PX[k]-PX[0])*(PY[k+1]-PY[0]) - (PX[k+1]-PX[0])*(PY[k]-PY[0])) * 0.5;
+      if (a < minArea) continue;
+      const b = faceCount * 8;
+      fPts[b] = PX[0];   fPts[b+1] = PY[0];
+      fPts[b+2] = PX[k]; fPts[b+3] = PY[k];
+      fPts[b+4] = PX[k+1]; fPts[b+5] = PY[k+1];
+      fPts[b+6] = PX[0]; fPts[b+7] = PY[0];
+      fArea[faceCount] = a;
+      fDepth[faceCount] = depth;
+      fMat[faceCount] = mat * 6 + faceIdx;
+      faceCount += 1;
+    }
+  }
+
+  const SEG = 8;
+  const discPts = new Float64Array(SEG * 3);
+
+  /* 中心 C、半径 R、鉛直から α 傾き、傾きの方位 χ の円盤。
+     最下点は C から水平に R·cosα（方位 χ）、下に R·sinα。 */
+  function tiltedDisc(cxp, cyp, czp, R, chi, mat) {
+    const ca = Math.cos(DISC_ALPHA), sa = Math.sin(DISC_ALPHA);
+    const cc = Math.cos(chi), sc = Math.sin(chi);
+    const e1 = [ca*cc, -sa, ca*sc];        // 面内・最下点へ向かう向き
+    const e2 = [-sc, 0, cc];               // 面内・それに直交
+
+    for (let k = 0; k < SEG; k += 1) {
+      const t = k / SEG * 2 * Math.PI;
+      const u = Math.cos(t) * R, v = Math.sin(t) * R;
+      discPts[k*3]     = cxp + u*e1[0] + v*e2[0];
+      discPts[k*3 + 1] = cyp + u*e1[1] + v*e2[1];
+      discPts[k*3 + 2] = czp + u*e1[2] + v*e2[2];
+    }
+    polyFan(discPts, SEG, mat, 2);          // 上面
+    for (let k = 0; k < SEG; k += 1) discPts[k*3 + 1] -= R * 0.06;
+    polyFan(discPts, SEG, mat, 3);          // 下面（薄板として）
+  }
+
   const pt = [0, 0];
 
   function project(px, py, pz, out) {
@@ -624,7 +768,46 @@
     groundCount = faceCount;
   }
 
+  function buildDiscMachine() {
+    const y0 = car.ride;
+    const R = spec.discR, e = spec.discE;
+    const drop = R * Math.sin(DISC_ALPHA);
+    const railW = spec.pitch * 0.12, shaftW = spec.crank * 0.7;
+    const bodyBot = geo.padTop + drop, bodyTop = bodyBot + 4 * spec.crank;
+    const bC = (bodyBot + bodyTop) / 2, bH = (bodyTop - bodyBot) / 2;
+    const chC = bodyTop + 2 * spec.crank, chH = spec.crank;
+
+    const co = spec.half + spec.pitch * 0.3, cw = spec.pitch * 0.25;
+    box(car.x, y0 + chC, car.z - co, co, chH, cw, MAT_CHASSIS);
+    box(car.x, y0 + chC, car.z + co, co, chH, cw, MAT_CHASSIS);
+    box(car.x - co, y0 + chC, car.z, cw, chH, co, MAT_CHASSIS);
+    box(car.x + co, y0 + chC, car.z, cw, chH, co, MAT_CHASSIS);
+
+    for (let i = 0; i < spec.rails; i += 1) {
+      const th = i * spec.step - phase.x;
+      const foot = y0 + spec.crank + spec.crank * Math.cos(th);   // 最下点の高さ
+      const chi = th + opt.delta + Math.PI / 2;
+      const x = car.x + railPos(i);
+      const mat = rampOf(RAMP_X, spec.crank * Math.cos(th));
+
+      box(x, foot + drop + bC, car.z, railW, bH, spec.half, MAT_X_BODY);
+      if (opt.mech) {
+        box(x, foot + drop + bC, car.z, shaftW, shaftW, spec.half + spec.pitch * 0.2, MAT_SHAFT);
+      }
+
+      for (let j = 0; j < spec.rails - 1; j += 1) {
+        const z = car.z + toothPos(j);
+        box(x, foot + drop + geo.padTop * 0.5, z, shaftW * 0.8, drop * 0.5 + geo.padTop, shaftW * 0.8, MAT_SHAFT);
+        tiltedDisc(x, foot + drop, z, R, chi, mat);
+        // 接地点。δ の向きへ掃いていく様子がここに出る
+        box(x + e * Math.cos(chi), foot, z + e * Math.sin(chi),
+            spec.pitch * 0.05, spec.pitch * 0.03, spec.pitch * 0.05, MAT_CONTACT);
+      }
+    }
+  }
+
   function buildMachine() {
+    if (opt.drive === 'disc') { buildDiscMachine(); return; }
     const y0 = car.ride;                       // 一番深い歯が地面に載るまで機体が沈む
     const padC = (0 + geo.padTop) / 2, padH = geo.padTop / 2;
     const xbC = (geo.xBodyBot + geo.xBodyTop) / 2, xbH = (geo.xBodyTop - geo.xBodyBot) / 2;
@@ -748,8 +931,12 @@
       ctx.stroke();
     }
 
-    if (motor.x !== 0 || motor.y !== 0) {
-      const a = Math.atan2(motor.y, motor.x);
+    const steer = opt.drive === 'disc'
+      ? (motor.x !== 0 ? opt.delta : null)
+      : ((motor.x !== 0 || motor.y !== 0) ? Math.atan2(motor.y, motor.x) : null);
+
+    if (steer !== null) {
+      const a = steer;
       const len = spec.size * 2.2;
       const okA = project(car.x, 1, car.z, pt);
       const x0 = pt[0], y0 = pt[1];
@@ -792,11 +979,14 @@
      UI
      ================================================================ */
   const el = id => document.getElementById(id);
-  const sX = el("sX"), sY = el("sY"), sA = el("sA"), sE = el("sE");
+  const panel = el("panel");
+  const sX = el("sX"), sY = el("sY"), sA = el("sA"), sE = el("sE"), sD = el("sD"), sR = el("sR");
   const vXo = el("vX"), vYo = el("vY"), vAo = el("vA"), vLim = el("vLim"), vEo = el("vE");
+  const vDo = el("vD"), vRo = el("vR");
   const rXo = el("rX"), rYo = el("rY"), rV = el("rV"), rErr = el("rErr");
   const rDist = el("rDist"), rShare = el("rShare"), note = el("note");
-  const bShare = el("bShare"), bAlt = el("bAlt"), bDemo = el("bDemo"), bBig = el("bBig");
+  const bShare = el("bShare"), bAlt = el("bAlt"), bDisc = el("bDisc");
+  const bDemo = el("bDemo"), bBig = el("bBig");
   const bPause = el("bPause");
 
   function sync() {
@@ -808,11 +998,23 @@
     vLim.textContent = isFinite(lim) ? `（上限 ${lim.toFixed(1)} Hz）` : "";
     vAo.style.color = opt.alternate && opt.altHz > lim ? "var(--warn)" : "";
     rXo.textContent = rpmOf("x").toFixed(0);
-    rYo.textContent = rpmOf("y").toFixed(0);
-    bShare.setAttribute("aria-pressed", String(!opt.alternate));
-    bAlt.setAttribute("aria-pressed", String(opt.alternate));
+    rYo.textContent = opt.drive === 'disc' ? '—' : rpmOf("y").toFixed(0);
+    bShare.setAttribute("aria-pressed", String(opt.drive === 'share'));
+    bAlt.setAttribute("aria-pressed", String(opt.drive === 'alt'));
+    bDisc.setAttribute("aria-pressed", String(opt.drive === 'disc'));
+    panel.setAttribute("data-mode", opt.drive);
+    vDo.textContent = `${Math.round(opt.delta * 180 / Math.PI)}°`;
+    vRo.textContent = `${opt.discFrac.toFixed(2)}  (e = ${spec.discE.toFixed(0)} mm)`;
     bDemo.setAttribute("aria-pressed", String(spec.name === "demo"));
     bBig.setAttribute("aria-pressed", String(spec.name === "big"));
+
+    note.classList.toggle('info', opt.drive === 'disc');
+    if (opt.drive === 'disc') {
+      const v = Math.abs(omega("x")) * spec.discE;
+      note.hidden = false;
+      note.textContent = `1ラティスのみ。歯先速度 e·ω = ${v.toFixed(0)} mm/s。ストローク ${(2*spec.crank).toFixed(0)} mm は速度と無関係で、δ を回すだけで全方位へ出られます。`;
+      return;
+    }
 
     const running = (motor.x !== 0) + (motor.y !== 0);
     if (!opt.retract && running === 1) {
@@ -833,10 +1035,16 @@
     const v = Math.hypot(avgVx, avgVz);
     rV.textContent = v >= 1000 ? `${(v / 1000).toFixed(2)} m/s` : `${v.toFixed(0)} mm/s`;
     rDist.textContent = `${(distance / 1000).toFixed(1)} m`;
-    rShare.textContent = `${Math.round(avgShare * 100)} / ${Math.round((1 - avgShare) * 100)}`;
+    rShare.textContent = opt.drive === 'disc'
+      ? '—'
+      : `${Math.round(avgShare * 100)} / ${Math.round((1 - avgShare) * 100)}`;
 
-    if (v > spec.crank * 0.3 && (motor.x || motor.y)) {
-      let e = Math.atan2(avgVz, avgVx) * 180 / Math.PI - Math.atan2(motor.y, motor.x) * 180 / Math.PI;
+    const commanded = opt.drive === 'disc'
+      ? (motor.x ? opt.delta * 180 / Math.PI : null)
+      : ((motor.x || motor.y) ? Math.atan2(motor.y, motor.x) * 180 / Math.PI : null);
+
+    if (v > spec.crank * 0.3 && commanded !== null) {
+      let e = Math.atan2(avgVz, avgVx) * 180 / Math.PI - commanded;
       while (e > 180) e -= 360;
       while (e < -180) e += 360;
       rErr.textContent = `${e >= 0 ? "+" : ""}${e.toFixed(0)}°`;
@@ -861,8 +1069,17 @@
   el("cMech").addEventListener("change", e => { opt.mech = e.target.checked; });
   el("cEdge").addEventListener("change", e => { opt.edge = e.target.checked; });
 
-  bShare.addEventListener("click", () => { opt.alternate = false; resetRun(); sync(); });
-  bAlt.addEventListener("click", () => { opt.alternate = true; resetRun(); sync(); });
+  const setDrive = m => { opt.drive = m; resetRun(); sync(); };
+  bShare.addEventListener("click", () => setDrive('share'));
+  bAlt.addEventListener("click", () => setDrive('alt'));
+  bDisc.addEventListener("click", () => setDrive('disc'));
+  sD.addEventListener("input", () => { opt.delta = Number(sD.value) * Math.PI / 180; sync(); });
+  sR.addEventListener("input", () => {
+    opt.discFrac = Number(sR.value);
+    spec.discE = opt.discFrac * spec.pitch;
+    spec.discR = spec.discE / Math.cos(DISC_ALPHA);
+    sync();
+  });
   function adoptPreset(name) {
     usePreset(name);
     const lim = altLimit();
@@ -880,7 +1097,7 @@
     bPause.textContent = opt.paused ? "再開" : "一時停止";
   });
 
-  const panel = el("panel"), bSheet = el("bSheet");
+  const bSheet = el("bSheet");
   function setSheet(open) {
     panel.classList.toggle("collapsed", !open);
     bSheet.textContent = open ? "操作パネルを閉じる" : "操作パネルを開く";
