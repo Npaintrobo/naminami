@@ -325,12 +325,13 @@ function core(pads, drv, { b = BREF.v, K, C } = {}) {
     slip: slipDen > 0 ? slipNum / slipDen / TIP : 0, load: mn,
     ripple: Math.sqrt(Math.max(0, nvar / wt - mn * mn)) / Math.max(mn, 1e-9),
     contact: cntSum / wt, minC, tilt: Math.sqrt(tilt2 / wt) * 180 / Math.PI,
+    yawRate: yaw / (WARM + SPAN) * 180 / Math.PI,      // 平均ヨー角速度 [°/s]
     psi: drv.psi * 180 / Math.PI
   };
 }
 
 /* ── 駆動 ───────────────────────────────────── */
-function polarDrive({ shaftA = 1, shaftB = 1, hold = false, target = 0, sweep = null } = {}) {
+function polarDrive({ shaftA = 1, shaftB = 1, hold = false, target = 0, sweep = null, swirl = null } = {}) {
   let phiA, phiB, q, qd, psi, psid;
   const d = {
     reset() { phiA = 0; phiB = 0; q = 0; qd = 0; psi = 0; psid = 0; d.q = 0; d.psi = 0; },
@@ -350,7 +351,10 @@ function polarDrive({ shaftA = 1, shaftB = 1, hold = false, target = 0, sweep = 
       d.q = q; d.psi = psi;
     },
     foot(p) {
-      const th = p.ph - q, c = Math.cos(psi), s = Math.sin(psi);
+      /* swirl: 足ごとに ψ をずらす（ヨーを出せるか調べるため）。
+         ψ が全足で共通なら合力は必ず ψ に共線で、ヨーモーメントは出ない。 */
+      const pp = swirl ? psi + swirl(p) : psi;
+      const th = p.ph - q, c = Math.cos(pp), s = Math.sin(pp);
       const sn = Math.sin(th), cs = Math.cos(th);
       return [-BREF.v * cs, AMP * sn * c, AMP * sn * s,
               -AMP * qd * cs * c - AMP * psid * sn * s,
