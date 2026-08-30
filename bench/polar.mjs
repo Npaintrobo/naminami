@@ -36,7 +36,7 @@ const wrap = v => { let d = v % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI
 const rampOf = t => Math.min(1, t / RAMP);
 
 /* ── 接触子の配置と位相場 ───────────────────────── */
-function lattice(dphiDeg, { shuffle = false, seed = 7, kdir = 'diag' } = {}) {
+function lattice(dphiDeg, { shuffle = false, seed = 7, kdir = 'diag', tol = 0 } = {}) {
   const d = dphiDeg * Math.PI / 180;
   const pads = [];
   const idx = (i, k) => (kdir === 'diag' ? i + k : i);
@@ -50,6 +50,19 @@ function lattice(dphiDeg, { shuffle = false, seed = 7, kdir = 'diag' } = {}) {
     const ph = pads.map(p => p.ph);
     for (let i = ph.length - 1; i > 0; i -= 1) { const j = Math.floor(rnd() * (i + 1)); [ph[i], ph[j]] = [ph[j], ph[i]]; }
     pads.forEach((p, i) => { p.ph = ph[i]; });
+  }
+  /* 組立公差。足ごとに固定の高さ誤差を与える（正規分布、σ = tol [mm]）。
+     接地窓は δp で決まるので、公差が δp に対して無視できないと
+     「一部の足だけが常に荷重を持つ」状態になる。 */
+  if (tol > 0) {
+    let st = seed * 7919 + 13;
+    const rnd = () => (st = Math.imul(st, 1103515245) + 12345 & 0x7fffffff) / 0x7fffffff;
+    for (const p of pads) {
+      const u = Math.max(1e-12, rnd()), v = rnd();
+      p.dz = tol * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);   // Box–Muller
+    }
+  } else {
+    for (const p of pads) p.dz = 0;
   }
   return pads;
 }
@@ -356,7 +369,7 @@ function polarDrive({ shaftA = 1, shaftB = 1, hold = false, target = 0, sweep = 
       const pp = swirl ? psi + swirl(p) : psi;
       const th = p.ph - q, c = Math.cos(pp), s = Math.sin(pp);
       const sn = Math.sin(th), cs = Math.cos(th);
-      return [-BREF.v * cs, AMP * sn * c, AMP * sn * s,
+      return [-BREF.v * cs + (p.dz || 0), AMP * sn * c, AMP * sn * s,
               -AMP * qd * cs * c - AMP * psid * sn * s,
               -AMP * qd * cs * s + AMP * psid * sn * c];
     },
@@ -656,6 +669,30 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   BREF.v = 6;
 
+  console.log('\n■ 組立公差に対する頑健性（Δφ=60° k=斜め, ψ=0, δp=0.3mm）');
+  console.log('    足ごとに固定の高さ誤差を与える（正規分布 σ）。接地窓は δp で決まるので、');
+  console.log('    公差が δp に対して無視できなければ「一部の足だけが常に荷重を持つ」はず、');
+  console.log('    という予想を確かめる。\n');
+  console.log('    高さ誤差 σ   速度              滑り    荷重リップル  平均接地  最小接地');
+  for (const bb of [6, 1.5]) {
+    BREF.v = bb;
+    console.log(`    --- 上下振幅 b = ${bb} mm（ストローク ${2 * bb} mm）`);
+    for (const tol of [0, 0.05, 0.1, 0.2, 0.5]) {
+      const pads = lattice(60, { kdir: 'diag', tol });
+      const tt = tune(pads, bb);
+      const r = core(pads, polarDrive({ shaftA: 1, shaftB: 1 }), { b: bb, K: tt.K, C: tt.C });
+      console.log(`    σ=${String(tol).padStart(4)}mm    ${r.pathSpeed.toFixed(0).padStart(4)} mm/s ` +
+        `(${(r.pathSpeed / TIP * 100).toFixed(0).padStart(3)}%)  ${(r.slip * 100).toFixed(1).padStart(5)}%  ` +
+        `${(r.ripple * 100).toFixed(0).padStart(6)}%   ${r.contact.toFixed(1).padStart(5)}    ${String(r.minC).padStart(3)}`);
+    }
+  }
+  BREF.v = 6;
+  console.log(`
+    → **予想は外れた。** δp=0.3mm に対して σ=0.5mm、つまり公差が接地窓より大きくても
+      速度は 94〜97% 出る。b=6mm では跳ねがむしろ収まる（リップル 120% → 70%）。
+      高さのばらつきが同期した離床を崩すため。組立公差はこの機構の律速ではない。
+`);
+
   console.log(`
 ■ この試験が言えること / 言えないこと
 
@@ -668,6 +705,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
    ・車両（荷 ≫ λ）では位相をシャッフルしても推力が落ちない。ここでは波ではなく当番表。
 
   言えないこと
+   ・**部品数が重い。** 足あたり最小3部品（偏心・上下カム・回る案内溝）で、
+     12×12 なら 432 部品。逆旋回2偏心で作るなら 1296（bench/mechanism.mjs）。
+   ・**厳密には非ホロノミックで、2モータではヨーが出ない**（bench/mechanism.mjs）。
+     ψ を空間分布させればヨーは作れるが、滑りが 0.6% → 15.1% になる。
    ・**跳ねている。** b=6mm では最小接地数が 0、荷重リップルが 100% を超える。
      上の速度はどれも「周期的に完全離床する機体」の値。b を下げれば収まるが、
      K・C も一緒に動くので効果の分離は上の表を見ること。
