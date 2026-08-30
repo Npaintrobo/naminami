@@ -5,13 +5,13 @@
 //
 //   node bench/table.mjs
 
-import { chromium } from 'playwright';
+import { launch } from './browser.mjs';
 import { pathToFileURL } from 'url';
 import { resolve } from 'path';
 
 const URL = pathToFileURL(resolve('index.html')).href;
 
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium-1194/chrome-linux/chrome' });
+const browser = await launch();
 const page = await browser.newPage();
 await page.goto(URL);
 await page.waitForFunction(() => typeof window.__probe !== 'undefined' || document.readyState === 'complete');

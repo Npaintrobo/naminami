@@ -348,27 +348,83 @@
      静的な沈み込みが常に spec.dp になるように整定する。 */
   let KC = 47, CC = 0.15;       // 接地ばね [N/mm]、減衰 [N.s/mm]
 
-  /* 「静的な沈み込みが δp」を定義から解く。最下点の貫入が δp になる高さでは
-     各接触子の貫入は max(0, δp − b(1−cos θ)) なので、その総和が重量を支えるように
-     KC を決める。総和は位相で振れるので1周期で平均する。
-     以前は「常に全体の12%が接地」と決め打ちしていて、実際の接地数（9〜36本）と
-     合っていなかった。 */
+  /* ある剛性 K のときの静的釣合い高さ */
+  function equilibrium(ys, K) {
+    const W = MASS * GRAV / ACC;
+    let lo = -spec.b - 30, hi = spec.b + 1;
+    for (let i = 0; i < 50; i += 1) {
+      const mid = (lo + hi) / 2;
+      let f = 0;
+      for (const y of ys) f += Math.max(0, -(mid + y)) * K;
+      if (f > W) lo = mid; else hi = mid;
+    }
+    return (lo + hi) / 2;
+  }
+
+  /* 「δp」は静的に置いたときの最大貫入と定義する。位相で振れるので1周期平均を取り、
+     それが δp になる K を二分法で解く。以前は総貫入量から一発で決めていて、
+     実際に釣り合わせた貫入（0.12mm）と設定値（0.3mm）が合っておらず、
+     画面に出していた接地窓（18.2°）も実際（11.6°）と食い違っていた。 */
   function tune() {
-    let sumPen = 0, sumCnt = 0;
-    const S = 72;
+    const S = 12;
+    const sets = [];
     for (let k = 0; k < S; k += 1) {
       const q = k / S * 2 * Math.PI;
-      for (const p of pads) {
-        const pen = spec.dp - spec.b * (1 - Math.cos(p.ph - q));
-        if (pen > 0) { sumPen += pen; sumCnt += 1; }
-      }
+      sets.push(pads.map(p => -spec.b * Math.cos(p.ph - q)));
     }
-    const pen = Math.max(sumPen / S, 1e-6);            // 1周期平均の総貫入量 [mm]
-    const nc = Math.max(1, sumCnt / S);                // 1周期平均の接地本数
-    KC = (MASS * GRAV / ACC) / pen;
-    CC = 2 * 0.35 * Math.sqrt(nc * KC * 1000 * MASS) / 1000 / nc;
-    live.nc = nc;
-    live.window = Math.acos(clamp(1 - spec.dp / spec.b, -1, 1)) * 180 / Math.PI;
+    const meanMax = K => {
+      let a = 0;
+      for (const ys of sets) {
+        const Y = equilibrium(ys, K);
+        let mx = 0;
+        for (const y of ys) mx = Math.max(mx, -(Y + y));
+        a += mx;
+      }
+      return a / S;
+    };
+    let klo = 0.05, khi = 20000;
+    for (let i = 0; i < 40; i += 1) {
+      const km = (klo + khi) / 2;
+      if (meanMax(km) > spec.dp) klo = km; else khi = km;   // K が大きいほど貫入は小さい
+    }
+    KC = (klo + khi) / 2;
+    live.pen = meanMax(KC);
+    live.window = Math.acos(clamp(1 - live.pen / spec.b, -1, 1)) * 180 / Math.PI;
+
+    let nc = 0, worst = Infinity, worstPts = 1e9;
+    for (const ys of sets) {
+      const Y = equilibrium(ys, KC);
+      const pts = [];
+      for (let i = 0; i < pads.length; i += 1) if (-(Y + ys[i]) > 0) { nc += 1; pts.push([pads[i].x, pads[i].z]); }
+      worstPts = Math.min(worstPts, pts.length);
+      worst = Math.min(worst, hullMargin(pts));
+    }
+    live.nc = Math.max(1, nc / S);
+    live.margin = worst;
+    live.minPts = worstPts;
+    CC = 2 * 0.35 * Math.sqrt(live.nc * KC * 1000 * MASS) / 1000 / live.nc;
+  }
+
+  /* 「接触が切れない」と「姿勢を保持できる」は別。接地点の凸包が重心の投影（原点）を
+     含んでいなければ、接触があってもピッチ・ロールは支持できない。その余裕を返す。 */
+  function hullMargin(pts) {
+    if (pts.length < 3) return -Infinity;
+    const s = pts.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    const cr = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    const half = arr => {
+      const h = [];
+      for (const q of arr) { while (h.length >= 2 && cr(h[h.length - 2], h[h.length - 1], q) <= 0) h.pop(); h.push(q); }
+      h.pop(); return h;
+    };
+    const h = half(s).concat(half(s.slice().reverse()));
+    if (h.length < 3) return -Infinity;
+    let m = Infinity;
+    for (let i = 0; i < h.length; i += 1) {
+      const a = h[i], c = h[(i + 1) % h.length];
+      const len = Math.hypot(c[0] - a[0], c[1] - a[1]) || 1;
+      m = Math.min(m, ((c[0] - a[0]) * (0 - a[1]) - (c[1] - a[1]) * (0 - a[0])) / len);
+    }
+    return m;
   }
   const ACC = 1000;             // N, kg -> mm/s^2
 
@@ -384,7 +440,7 @@
   const view = { yaw: 0.72, pitch: 0.5, dist: 1400 };
   const opt = { mech: true, edge: true, paused: false, exag: 1, hold: false, target: 0 };
   const live = { q: 0, qd: 0, psi: 0, psid: 0, slip: 0, dist: 0, contact: 0, load: 1,
-                 nc: 0, window: 0, gap: 0 };
+                 nc: 0, window: 0, gap: 0, pen: 0, margin: 0, minPts: 0 };
 
   /* 固定刻みで回したときの周期平均を採る計測器 */
   const meter = { on: false, t: 0, dx: 0, dz: 0, slip: 0, load: 0, load2: 0, tilt2: 0, cnt: 0, minC: 1e9 };
@@ -952,17 +1008,26 @@
     const steps = spec.kdiag ? 2 * spec.n - 1 : spec.n;   // 位相を配れる段数
 
     const msgs = ["波長 λ ≈ " + lam.toFixed(0) + " mm",
-                  "接地窓 ±" + live.window.toFixed(1) + "° / 最大位相ギャップ " + live.gap.toFixed(0) +
-                  "° / 平均接地 " + live.nc.toFixed(1) + " 本"];
+                  "実測貫入 " + live.pen.toFixed(3) + " mm / 接地窓 ±" + live.window.toFixed(1) +
+                  "° / 最大位相ギャップ " + live.gap.toFixed(0) + "° / 平均接地 " + live.nc.toFixed(1) + " 本",
+                  "静的支持余裕 " + (live.margin === -Infinity ? "支持不能" : live.margin.toFixed(0) + " mm") +
+                  "（最小接地点数 " + live.minPts + " 点）"];
 
-    /* 支持が切れる条件は「1波長を張るか」ではない。位相集合の最大循環ギャップが
-       接地窓の全幅 2θc を超えたときに、山にいる接触子が居ない瞬間ができる。
-       θc = acos(1 − δp/b)。b=6mm, δp=0.3mm なら θc≈18.2°、2θc≈36.4°。 */
+    /* 接触があることと姿勢を保持できることは別。接地点の凸包が重心の投影を含まないと、
+       接触していてもピッチ・ロールを支持できない。 */
+    if (live.margin <= 0) {
+      msgs.push("⚠ 接地点の凸包が重心の投影を含まない位相があります（最小接地点数 " + live.minPts +
+                " 点）。接触は切れていなくても姿勢を支持できません。");
+    }
+
+    /* 位相ギャップは「車高が一定なら接触が切れる」という話でしかない。実際には機体が
+       沈んで支持を探すので、これだけでは支持不能を意味しない（Δφ=60° は支持余裕 212mm ある）。
+       跳ねやすさの目安として出すに留め、警告は支持余裕のほうで出す。 */
     if (live.gap > 2 * live.window) {
-      msgs.push("⚠ 最大位相ギャップ " + live.gap.toFixed(0) + "° が接地窓の全幅 " +
-                (2 * live.window).toFixed(0) + "° を超えています。山にいる接触子が存在しない瞬間ができ、" +
-                "θ が 90° を超えた（面内速度が逆向きの）接触子が荷重を持って失速・逆走します。" +
-                "Δφ を粗くするか、δp を大きくして窓を広げてください。");
+      msgs.push("位相ギャップが接地窓の全幅（" + (2 * live.window).toFixed(0) +
+                "°）を超えています。車高が一定なら接触が切れる配り方です。実際は機体が沈んで" +
+                "支持を探すので静的には切れませんが、沈み込みが追いつかないと跳ねます。" +
+                "上下振幅 b を下げると収まります。");
     }
     if (!spec.kdiag) {
       msgs.push("k を軸に平行にすると同位相の接触子が1列に並んで線接触になり、機体が首を振ります。" +
@@ -1167,19 +1232,23 @@
 
   /* ヘッドレス計測の口（bench/polar3d.mjs が使う）。UI からは触らない。 */
   window.__probe = {
+    /* 未指定の項目は必ず既定値へ戻す。前の試験の設定が残っていると、
+       たとえば b 掃引のあとの試験が暗黙に b=0.8mm で走ってしまう。 */
     config(o) {
-      if (o.dphiDeg !== undefined) spec.dphi = o.dphiDeg * Math.PI / 180;
-      if (o.kdiag !== undefined) spec.kdiag = o.kdiag;
-      if (o.a !== undefined) spec.a = o.a;
-      if (o.b !== undefined) spec.b = o.b;
-      if (o.dp !== undefined) spec.dp = o.dp;
+      const D = { dphiDeg: 60, kdiag: true, a: 6, b: 6, dp: 0.3,
+                  shaftA: 2, shaftB: 2, hold: false, targetDeg: 0 };
+      const c = Object.assign({}, D, o);
+      spec.dphi = c.dphiDeg * Math.PI / 180;
+      spec.kdiag = c.kdiag;
+      spec.a = c.a; spec.b = c.b; spec.dp = c.dp;
       buildPads();
-      if (o.shaftA !== undefined) shaft.a = o.shaftA;
-      if (o.shaftB !== undefined) shaft.b = o.shaftB;
-      opt.hold = !!o.hold;
-      if (o.targetDeg !== undefined) opt.target = o.targetDeg * Math.PI / 180;
+      shaft.a = c.shaftA; shaft.b = c.shaftB;
+      opt.hold = c.hold;
+      opt.target = c.targetDeg * Math.PI / 180;
       opt.paused = true;
       resetRun();
+      return { K: KC, C: CC, b: spec.b, a: spec.a, dp: spec.dp,
+               dphiDeg: c.dphiDeg, kdiag: c.kdiag, shaftA: c.shaftA, shaftB: c.shaftB };
     },
     /* 固定刻みで回す。warm 秒は捨てて、その後を平均する。 */
     run(seconds, warm, dt) {
