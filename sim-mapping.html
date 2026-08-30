@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>円環写像シミュレータ — naminami</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #071018;
+      --surface: #0e1924;
+      --surface-2: #142433;
+      --line: #2a4052;
+      --text: #edf6fa;
+      --muted: #91a7b5;
+      --cyan: #53d7db;
+      --blue: #4d8fff;
+      --amber: #ffbd5b;
+      --red: #ff6f71;
+      --green: #66d59a;
+      --shadow: 0 18px 60px rgba(0, 0, 0, .32);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(83, 215, 219, .08), transparent 31rem),
+        radial-gradient(circle at 92% 15%, rgba(77, 143, 255, .08), transparent 34rem),
+        var(--bg);
+      font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select { font: inherit; }
+    button, select, input[type="range"] { accent-color: var(--cyan); }
+    button:focus-visible, select:focus-visible, input:focus-visible {
+      outline: 2px solid var(--cyan);
+      outline-offset: 2px;
+    }
+    .app { width: min(1500px, 100%); margin: 0 auto; padding: 22px; }
+    header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 16px;
+    }
+    h1 { margin: 0; font-size: clamp(22px, 3vw, 34px); line-height: 1.12; letter-spacing: -.03em; }
+    h1 span { color: var(--cyan); }
+    .subtitle { margin: 6px 0 0; color: var(--muted); }
+    .model-tag {
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--muted);
+      background: rgba(14, 25, 36, .72);
+      font-size: 12px;
+    }
+    .layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 16px; }
+    .stage, .panel, .metric {
+      border: 1px solid rgba(99, 140, 164, .24);
+      background: linear-gradient(155deg, rgba(20, 36, 51, .94), rgba(10, 20, 30, .95));
+      box-shadow: var(--shadow);
+    }
+    .stage {
+      position: relative;
+      align-self: start;
+      height: min(760px, calc(100vh - 118px));
+      min-height: 600px;
+      overflow: hidden;
+      border-radius: 20px;
+    }
+    canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+    .stage-toolbar {
+      position: absolute;
+      z-index: 3;
+      top: 14px;
+      left: 14px;
+      right: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      pointer-events: none;
+    }
+    .button-row, .view-tabs { display: flex; gap: 7px; flex-wrap: wrap; pointer-events: auto; }
+    button {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 7px 11px;
+      color: var(--text);
+      background: rgba(14, 25, 36, .88);
+      cursor: pointer;
+    }
+    button:hover { border-color: #4f748c; background: rgba(20, 36, 51, .96); }
+    button.active, button.primary { color: #031315; border-color: var(--cyan); background: var(--cyan); }
+    button.compact { min-height: 32px; padding: 5px 9px; font-size: 12px; }
+    .legend {
+      position: absolute;
+      z-index: 3;
+      left: 16px;
+      bottom: 14px;
+      display: flex;
+      gap: 14px;
+      flex-wrap: wrap;
+      color: var(--muted);
+      font-size: 12px;
+      pointer-events: none;
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .swatch { width: 14px; height: 4px; border-radius: 2px; background: var(--cyan); }
+    .swatch.hot { background: var(--amber); }
+    .swatch.pin { background: var(--blue); }
+    .stage-note {
+      position: absolute;
+      z-index: 3;
+      right: 16px;
+      bottom: 14px;
+      max-width: 280px;
+      color: var(--muted);
+      text-align: right;
+      font-size: 12px;
+      pointer-events: none;
+    }
+    aside { display: flex; flex-direction: column; gap: 12px; }
+    .panel { border-radius: 16px; padding: 14px; }
+    .panel h2 { margin: 0 0 11px; font-size: 14px; font-weight: 650; }
+    .preset-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .control { margin-top: 12px; }
+    .control:first-child { margin-top: 0; }
+    .control label, .control-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 5px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .value { color: var(--text); font-variant-numeric: tabular-nums; }
+    input[type="range"] { width: 100%; margin: 0; }
+    select {
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 9px;
+      padding: 6px 9px;
+      color: var(--text);
+      background: var(--surface-2);
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .checks { display: flex; gap: 13px; flex-wrap: wrap; margin-top: 11px; color: var(--muted); font-size: 12px; }
+    .checks label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .metric { min-width: 0; border-radius: 12px; padding: 10px; box-shadow: none; }
+    .metric-label { color: var(--muted); font-size: 11px; }
+    .metric-value { margin-top: 2px; font-size: 18px; font-weight: 680; font-variant-numeric: tabular-nums; }
+    .metric-value small { color: var(--muted); font-size: 11px; font-weight: 500; }
+    .status {
+      display: flex;
+      align-items: flex-start;
+      gap: 9px;
+      margin-top: 10px;
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .status-dot { flex: 0 0 auto; width: 9px; height: 9px; margin-top: 4px; border-radius: 50%; background: var(--green); box-shadow: 0 0 14px rgba(102, 213, 154, .55); }
+    .status.warn .status-dot { background: var(--amber); box-shadow: 0 0 14px rgba(255, 189, 91, .55); }
+    .status.bad .status-dot { background: var(--red); box-shadow: 0 0 14px rgba(255, 111, 113, .55); }
+    .status strong { display: block; color: var(--text); font-weight: 650; }
+    .loading {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      display: grid;
+      place-items: center;
+      color: var(--text);
+      background: rgba(7, 16, 24, .64);
+      backdrop-filter: blur(4px);
+    }
+    .loading[hidden] { display: none; }
+    .loading-box { border: 1px solid var(--line); border-radius: 12px; padding: 12px 15px; background: var(--surface); }
+    footer { margin-top: 14px; color: var(--muted); font-size: 12px; }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { display: grid; grid-template-columns: 1fr 1fr; align-items: start; }
+      .stage { width: 100%; height: 600px; min-height: 560px; }
+    }
+    @media (max-width: 650px) {
+      .app { padding: 12px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .model-tag { display: none; }
+      aside { display: flex; }
+      .stage { height: 520px; min-height: 500px; border-radius: 14px; }
+      .stage-toolbar { align-items: flex-start; }
+      .stage-toolbar .button-row { justify-content: flex-end; }
+      .stage-note { display: none; }
+      .legend { right: 12px; gap: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <h1>運動生成を、円形シートへ<span>写像する</span></h1>
+        <p class="subtitle">正方形SAWユニット × 離散ピン × 同心円溝 × 非回転ゴムシート</p>
+      </div>
+      <div class="model-tag">無荷重・準静的な薄板スプライン上界</div>
+    </header>
+
+    <div class="layout">
+      <section class="stage" aria-label="円環写像の可視化">
+        <div class="stage-toolbar">
+          <div class="view-tabs" role="group" aria-label="表示モード">
+            <button type="button" class="active" data-view="iso">3D</button>
+            <button type="button" data-view="top">上面</button>
+            <button type="button" data-view="section">伝播断面</button>
+          </div>
+          <div class="button-row">
+            <button type="button" id="stepButton" class="compact" aria-label="位相を15度進める">+15°</button>
+            <button type="button" id="playButton" class="primary" aria-pressed="true">一時停止</button>
+          </div>
+        </div>
+        <canvas id="simCanvas" aria-label="円形シートへ写像された進行波のアニメーション"></canvas>
+        <div class="legend" aria-hidden="true">
+          <span><i class="swatch pin"></i>入力ピン</span>
+          <span><i class="swatch"></i>円形シート</span>
+          <span><i class="swatch hot"></i>正の波高</span>
+        </div>
+        <div class="stage-note">3D表示はドラッグで回転。鉛直変位と面内矢印は見やすく拡大表示。</div>
+        <div class="loading" id="loading" hidden><div class="loading-box">写像行列を再計算中…</div></div>
+      </section>
+
+      <aside>
+        <section class="panel">
+          <h2>設計点</h2>
+          <div class="preset-row">
+            <button type="button" class="compact" data-preset="prototype">原理試作</button>
+            <button type="button" class="compact" data-preset="balanced">20 kg級</button>
+            <button type="button" class="compact" data-preset="compact">小型</button>
+          </div>
+
+          <div class="two-col">
+            <div class="control">
+              <label for="gridN">格子</label>
+              <select id="gridN">
+                <option value="8">8 × 8</option>
+                <option value="12" selected>12 × 12</option>
+                <option value="16">16 × 16</option>
+                <option value="20">20 × 20</option>
+              </select>
+            </div>
+            <div class="control">
+              <label for="waveRatio">λ / p</label>
+              <select id="waveRatio">
+                <option value="2">2</option>
+                <option value="3">3</option>
+                <option value="4">4</option>
+                <option value="6" selected>6</option>
+                <option value="8">8</option>
+                <option value="10">10</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="control">
+            <div class="control-head"><label for="steering">操舵方位 ψ</label><span class="value" id="steeringValue">30°</span></div>
+            <input id="steering" type="range" min="0" max="180" step="1" value="30">
+          </div>
+          <div class="control">
+            <div class="control-head"><label for="regularization">追従低下 reg</label><span class="value" id="regularizationValue">1.00</span></div>
+            <input id="regularization" type="range" min="0" max="3" step="0.25" value="1">
+          </div>
+          <div class="control">
+            <div class="control-head"><label for="phase">搬送位相 q</label><span class="value" id="phaseValue">0°</span></div>
+            <input id="phase" type="range" min="0" max="360" step="1" value="0">
+          </div>
+          <div class="checks">
+            <label><input id="showPins" type="checkbox" checked> ピン</label>
+            <label><input id="showGrooves" type="checkbox" checked> 円溝</label>
+            <label><input id="showArrows" type="checkbox" checked> 面内変位</label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>寸法・速度</h2>
+          <div class="two-col">
+            <div class="control">
+              <div class="control-head"><label for="pitch">ピッチ p</label><span class="value" id="pitchValue">20 mm</span></div>
+              <input id="pitch" type="range" min="10" max="50" step="2.5" value="20">
+            </div>
+            <div class="control">
+              <div class="control-head"><label for="thickness">厚さ t</label><span class="value" id="thicknessValue">10 mm</span></div>
+              <input id="thickness" type="range" min="4" max="20" step="1" value="10">
+            </div>
+          </div>
+          <div class="two-col">
+            <div class="control">
+              <div class="control-head"><label for="amplitude">振幅 W</label><span class="value" id="amplitudeValue">2.0 mm</span></div>
+              <input id="amplitude" type="range" min="0.5" max="8" step="0.5" value="2">
+            </div>
+            <div class="control">
+              <div class="control-head"><label for="rpm">回転数</label><span class="value" id="rpmValue">400 rpm</span></div>
+              <input id="rpm" type="range" min="60" max="500" step="10" value="400">
+            </div>
+          </div>
+        </section>
+
+        <section class="panel" aria-live="polite">
+          <h2>現在点の上界指標</h2>
+          <div class="metrics">
+            <div class="metric"><div class="metric-label">円内ピン数</div><div class="metric-value" id="pinMetric">112</div></div>
+            <div class="metric"><div class="metric-label">円板内の波数</div><div class="metric-value" id="waveMetric">2.00</div></div>
+            <div class="metric"><div class="metric-label">写像 gain 5%</div><div class="metric-value" id="gainMetric">—</div></div>
+            <div class="metric"><div class="metric-label">直交漏れ 95%</div><div class="metric-value" id="leakMetric">—</div></div>
+            <div class="metric"><div class="metric-label">表面速度上界</div><div class="metric-value" id="speedMetric">— <small>mm/s</small></div></div>
+            <div class="metric"><div class="metric-label">曲げひずみ概算</div><div class="metric-value" id="strainMetric">— <small>%</small></div></div>
+            <div class="metric"><div class="metric-label">鉛直加速度</div><div class="metric-value" id="accelMetric">— <small>g</small></div></div>
+            <div class="metric"><div class="metric-label">波面傾斜 kW</div><div class="metric-value" id="slopeMetric">—</div></div>
+          </div>
+          <div class="status" id="statusBox">
+            <span class="status-dot"></span>
+            <div><strong id="statusTitle">計算中</strong><span id="statusText">写像モデルを初期化しています。</span></div>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <footer>この表示は搬送性能の予測ではありません。荷重接触、同心円溝の摩擦・離脱、ゴムの超弾性、発熱、摩耗は未実装です。</footer>
+  </main>
+
+  <script>
+  (() => {
+    'use strict';
+    const G = 9.80665;
+    const canvas = document.getElementById('simCanvas');
+    const ctx = canvas.getContext('2d', { alpha: false });
+    const loading = document.getElementById('loading');
+    const state = {
+      N: 12, m: 6, psiDeg: 30, reg: 1, pitch: 20, thickness: 10,
+      amplitude: 2, rpm: 400, phase: 0, running: true, view: 'iso',
+      showPins: true, showGrooves: true, showArrows: true,
+      azimuth: -0.72, frameCount: 0, modelReady: false
+    };
+    let model = null, rebuildTimer = 0, lastTime = performance.now();
+
+    function lu(A, n) {
+      const piv = Int32Array.from({ length: n }, (_, i) => i);
+      for (let k = 0; k < n; k += 1) {
+        let p = k, mx = Math.abs(A[k * n + k]);
+        for (let i = k + 1; i < n; i += 1) {
+          const v = Math.abs(A[i * n + k]);
+          if (v > mx) { mx = v; p = i; }
+        }
+        if (!(mx > 1e-13)) throw new Error(`singular pivot ${k}: ${mx}`);
+        if (p !== k) {
+          for (let j = 0; j < n; j += 1) {
+            const v = A[k * n + j]; A[k * n + j] = A[p * n + j]; A[p * n + j] = v;
+          }
+          const v = piv[k]; piv[k] = piv[p]; piv[p] = v;
+        }
+        const d = A[k * n + k];
+        for (let i = k + 1; i < n; i += 1) {
+          const f = A[i * n + k] / d;
+          A[i * n + k] = f;
+          for (let j = k + 1; j < n; j += 1) A[i * n + j] -= f * A[k * n + j];
+        }
+      }
+      return piv;
+    }
+
+    function luSolve(A, piv, b, n) {
+      const y = new Float64Array(n), x = new Float64Array(n);
+      for (let i = 0; i < n; i += 1) {
+        let s = b[piv[i]];
+        for (let j = 0; j < i; j += 1) s -= A[i * n + j] * y[j];
+        y[i] = s;
+      }
+      for (let i = n - 1; i >= 0; i -= 1) {
+        let s = y[i];
+        for (let j = i + 1; j < n; j += 1) s -= A[i * n + j] * x[j];
+        x[i] = s / A[i * n + i];
+      }
+      return x;
+    }
+
+    function phi(dx, dy) {
+      const r2 = dx * dx + dy * dy;
+      return r2 === 0 ? 0 : 0.5 * r2 * Math.log(r2);
+    }
+
+    function gradPhi(dx, dy) {
+      const r2 = dx * dx + dy * dy;
+      if (r2 === 0) return [0, 0];
+      const c = Math.log(r2) + 1;
+      return [c * dx, c * dy];
+    }
+
+    function quantile(values, q) {
+      const a = [...values].sort((x, y) => x - y);
+      return a[Math.min(a.length - 1, Math.max(0, Math.floor(q * (a.length - 1))))];
+    }
+
+    function buildModel() {
+      const N = state.N, R = N / 2, pts = [], allPins = [];
+      for (let j = 0; j < N; j += 1) for (let i = 0; i < N; i += 1) {
+        const x = i - (N - 1) / 2, y = j - (N - 1) / 2;
+        const active = Math.hypot(x, y) <= R;
+        allPins.push({ x, y, active });
+        if (active) pts.push([x, y]);
+      }
+      const n = pts.length, dim = n + 3;
+      const A = new Float64Array(dim * dim);
+      for (let i = 0; i < n; i += 1) for (let j = 0; j < n; j += 1)
+        A[i * dim + j] = phi(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]);
+      for (let i = 0; i < n; i += 1) {
+        A[i * dim + i] += state.reg;
+        const [x, y] = pts[i];
+        for (const [q, v] of [[n, 1], [n + 1, x], [n + 2, y]]) {
+          A[i * dim + q] = v; A[q * dim + i] = v;
+        }
+      }
+      const factored = new Float64Array(A), piv = lu(factored, dim);
+      const psi = state.psiDeg * Math.PI / 180;
+      const k = 2 * Math.PI / state.m, d = [Math.cos(psi), Math.sin(psi)];
+      const bc = new Float64Array(dim), bs = new Float64Array(dim);
+      for (let i = 0; i < n; i += 1) {
+        const s = pts[i][0] * d[0] + pts[i][1] * d[1];
+        bc[i] = Math.cos(k * s); bs[i] = Math.sin(k * s);
+      }
+      const f = { N, R, pts, allPins, k, d, cc: luSolve(factored, piv, bc, dim), cs: luSolve(factored, piv, bs, dim) };
+      f.evaluate = (c, x, y) => {
+        let z = c[n] + c[n + 1] * x + c[n + 2] * y, gx = c[n + 1], gy = c[n + 2];
+        for (let i = 0; i < n; i += 1) {
+          const dx = x - pts[i][0], dy = y - pts[i][1], g = gradPhi(dx, dy);
+          z += c[i] * phi(dx, dy); gx += c[i] * g[0]; gy += c[i] * g[1];
+        }
+        return { z, gx, gy };
+      };
+
+      const cells = 32, step = 2 * R / cells, rows = [];
+      for (let j = 0; j <= cells; j += 1) {
+        const row = [];
+        for (let i = 0; i <= cells; i += 1) {
+          const x = -R + i * step, y = -R + j * step;
+          if (Math.hypot(x, y) > R - .06) row.push(null);
+          else {
+            const c = f.evaluate(f.cc, x, y), s = f.evaluate(f.cs, x, y);
+            row.push({ x, y, c, s });
+          }
+        }
+        rows.push(row);
+      }
+      f.rows = rows;
+
+      const gains = [], leaks = [], vertical = [], perp = [-d[1], d[0]];
+      const evalStep = .32;
+      for (let y = -R + 1; y <= R - 1 + 1e-9; y += evalStep) for (let x = -R + 1; x <= R - 1 + 1e-9; x += evalStep) {
+        if (Math.hypot(x, y) > R - 1) continue;
+        const c = f.evaluate(f.cc, x, y), s = f.evaluate(f.cs, x, y);
+        const pc = c.gx * d[0] + c.gy * d[1], ps = s.gx * d[0] + s.gy * d[1];
+        const qc = c.gx * perp[0] + c.gy * perp[1], qs = s.gx * perp[0] + s.gy * perp[1];
+        gains.push(Math.hypot(pc, ps) / k);
+        leaks.push(Math.hypot(qc, qs) / k);
+        vertical.push(Math.hypot(c.z, s.z));
+      }
+      f.metrics = {
+        pinCount: n,
+        gainP05: quantile(gains, .05),
+        gainMedian: quantile(gains, .5),
+        leakageP95: quantile(leaks, .95),
+        verticalP05: quantile(vertical, .05)
+      };
+      return f;
+    }
+
+    function scheduleRebuild() {
+      clearTimeout(rebuildTimer);
+      loading.hidden = false;
+      state.modelReady = false;
+      rebuildTimer = setTimeout(() => {
+        try {
+          model = buildModel();
+          state.modelReady = true;
+          updateMetrics();
+          loading.hidden = true;
+        } catch (error) {
+          loading.querySelector('.loading-box').textContent = `計算失敗: ${error.message}`;
+          console.error(error);
+        }
+      }, 60);
+    }
+
+    function derived() {
+      if (!model) return null;
+      const lambda = state.pitch * state.m;
+      const diameter = state.N * state.pitch;
+      const k = 2 * Math.PI / lambda;
+      const omega = state.rpm * Math.PI / 30;
+      const slope = k * state.amplitude;
+      const strain = state.thickness * state.amplitude * k * k / 2;
+      const accelG = (state.amplitude / 1000) * omega * omega / G;
+      const speed = model.metrics.gainMedian * (state.thickness / 2) * state.amplitude * k * omega;
+      return { lambda, diameter, k, omega, slope, strain, accelG, speed, waves: diameter / lambda, tLambda: state.thickness / lambda };
+    }
+
+    function updateMetrics() {
+      if (!model) return;
+      const d = derived(), m = model.metrics;
+      document.getElementById('pinMetric').textContent = m.pinCount;
+      document.getElementById('waveMetric').textContent = d.waves.toFixed(2);
+      document.getElementById('gainMetric').textContent = m.gainP05.toFixed(3);
+      document.getElementById('leakMetric').textContent = m.leakageP95.toFixed(3);
+      document.getElementById('speedMetric').innerHTML = `${d.speed.toFixed(1)} <small>mm/s</small>`;
+      document.getElementById('strainMetric').innerHTML = `${(100 * d.strain).toFixed(1)} <small>%</small>`;
+      document.getElementById('accelMetric').innerHTML = `${d.accelG.toFixed(2)} <small>g</small>`;
+      document.getElementById('slopeMetric').textContent = d.slope.toFixed(3);
+
+      const failures = [];
+      if (m.gainP05 < .90) failures.push('写像gain');
+      if (m.leakageP95 > .10) failures.push('方向漏れ');
+      if (d.waves < 2) failures.push('円板内波数');
+      if (d.slope > .25) failures.push('波面傾斜');
+      if (d.strain > .05) failures.push('曲げひずみ');
+      if (d.accelG > .8) failures.push('鉛直加速度');
+      if (d.tLambda > .1) failures.push('薄板近似');
+      const box = document.getElementById('statusBox');
+      box.className = `status ${failures.length > 2 ? 'bad' : failures.length ? 'warn' : ''}`;
+      document.getElementById('statusTitle').textContent = failures.length ? 'スクリーニング条件外' : '次段階へ進める候補';
+      document.getElementById('statusText').textContent = failures.length
+        ? `要確認: ${failures.join('・')}`
+        : '無荷重上界の必要条件は通過。荷重接触の成立は別途検証が必要。';
+    }
+
+    function resize() {
+      const rect = canvas.getBoundingClientRect(), dpr = Math.min(2, devicePixelRatio || 1);
+      const w = Math.max(1, Math.round(rect.width * dpr));
+      const h = Math.max(1, Math.round(rect.height * dpr));
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      return { w: rect.width, h: rect.height };
+    }
+
+    function mix(v) {
+      const x = Math.max(-1, Math.min(1, v));
+      if (x >= 0) return `rgba(${Math.round(68 + 187 * x)},${Math.round(180 + 9 * x)},${Math.round(196 - 107 * x)},.78)`;
+      const a = -x;
+      return `rgba(${Math.round(68 - 13 * a)},${Math.round(180 - 89 * a)},${Math.round(196 + 49 * a)},.76)`;
+    }
+
+    function projectedSetup(w, h) {
+      const scale = Math.min(w / (state.N * 2.05), h / (state.N * 1.34));
+      const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
+      const project = (x, y, z = 0) => {
+        const xr = x * ca - y * sa, yr = x * sa + y * ca;
+        return { x: w * .50 + xr * scale, y: h * .55 + yr * scale * .42 - z * scale * .78, depth: yr };
+      };
+      return { scale, project };
+    }
+
+    function pointAt(node, cq, sq) {
+      if (!node) return null;
+      return {
+        x: node.x, y: node.y,
+        z: node.c.z * cq + node.s.z * sq,
+        gx: node.c.gx * cq + node.s.gx * sq,
+        gy: node.c.gy * cq + node.s.gy * sq
+      };
+    }
+
+    function drawIso(w, h) {
+      const { scale, project } = projectedSetup(w, h);
+      const q = state.phase, cq = Math.cos(q), sq = Math.sin(q);
+      const zScale = Math.max(0.65, state.amplitude / state.pitch * 8.5);
+      const half = state.N * .65;
+      const base = [[-half,-half],[half,-half],[half,half],[-half,half]].map(([x,y]) => project(x,y,-1.05));
+      ctx.beginPath(); base.forEach((p,i) => i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y)); ctx.closePath();
+      ctx.fillStyle = '#0b1822'; ctx.fill(); ctx.strokeStyle = '#294355'; ctx.lineWidth = 1.2; ctx.stroke();
+
+      if (state.showGrooves) {
+        ctx.strokeStyle = 'rgba(83,215,219,.28)'; ctx.lineWidth = 1;
+        for (let r = model.R * .18; r < model.R * .94; r += model.R * .14) {
+          ctx.beginPath();
+          for (let a = 0; a <= Math.PI * 2 + .04; a += .06) {
+            const p = project(r * Math.cos(a), r * Math.sin(a), -.14);
+            if (a === 0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+          }
+          ctx.stroke();
+        }
+      }
+
+      if (state.showPins) {
+        const sorted = [...model.allPins].sort((a,b) => project(a.x,a.y).depth - project(b.x,b.y).depth);
+        for (const p0 of sorted) {
+          const wave = Math.cos(model.k * (p0.x * model.d[0] + p0.y * model.d[1]) - q);
+          const top = project(p0.x, p0.y, p0.active ? wave * zScale : -.25);
+          const bottom = project(p0.x, p0.y, -1.02);
+          ctx.strokeStyle = p0.active ? 'rgba(77,143,255,.68)' : 'rgba(77,105,125,.22)';
+          ctx.lineWidth = p0.active ? Math.max(1, scale * .055) : 1;
+          ctx.beginPath(); ctx.moveTo(bottom.x,bottom.y); ctx.lineTo(top.x,top.y); ctx.stroke();
+          if (p0.active) { ctx.fillStyle = wave > 0 ? '#ffbd5b' : '#4d8fff'; ctx.beginPath(); ctx.arc(top.x,top.y,Math.max(1.4,scale*.07),0,Math.PI*2); ctx.fill(); }
+        }
+      }
+
+      const quads = [];
+      for (let j = 0; j < model.rows.length - 1; j += 1) for (let i = 0; i < model.rows[j].length - 1; i += 1) {
+        const ns = [model.rows[j][i], model.rows[j][i+1], model.rows[j+1][i+1], model.rows[j+1][i]];
+        if (ns.some(n => !n)) continue;
+        const ps = ns.map(n => pointAt(n,cq,sq));
+        quads.push({ ps, depth: ps.reduce((s,p) => s + project(p.x,p.y).depth,0)/4, z: ps.reduce((s,p) => s+p.z,0)/4 });
+      }
+      quads.sort((a,b) => a.depth-b.depth);
+      for (const quad of quads) {
+        const pp = quad.ps.map(p => project(p.x,p.y,p.z*zScale));
+        ctx.beginPath(); pp.forEach((p,i) => i ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y)); ctx.closePath();
+        ctx.fillStyle = mix(quad.z); ctx.fill();
+      }
+
+      ctx.strokeStyle = 'rgba(153,240,235,.84)'; ctx.lineWidth = 1.6; ctx.beginPath();
+      for (let a=0;a<=Math.PI*2+.03;a+=.035) {
+        const x=model.R*Math.cos(a), y=model.R*Math.sin(a);
+        const c=model.evaluate(model.cc,x,y), s=model.evaluate(model.cs,x,y);
+        const z=c.z*cq+s.z*sq, p=project(x,y,z*zScale);
+        if (a===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+      }
+      ctx.stroke();
+
+      if (state.showArrows) {
+        const stride = 6, visual = Math.max(6, scale * state.thickness * state.amplitude / (2 * state.pitch * state.pitch) * 15);
+        for (let j=3;j<model.rows.length-3;j+=stride) for (let i=3;i<model.rows[j].length-3;i+=stride) {
+          const n=model.rows[j][i]; if(!n) continue; const p=pointAt(n,cq,sq);
+          const a=project(p.x,p.y,p.z*zScale), b=project(p.x-p.gx*visual/scale,p.y-p.gy*visual/scale,p.z*zScale+.03);
+          drawArrow(a.x,a.y,b.x,b.y,'rgba(238,246,250,.78)',1.15);
+        }
+      }
+      const origin=project(-model.R*.72,-model.R*.72,-.72), tip=project(-model.R*.72+model.d[0]*2.1,-model.R*.72+model.d[1]*2.1,-.72);
+      drawArrow(origin.x,origin.y,tip.x,tip.y,'#53d7db',2.2);
+      drawLabel(ctx,'ψ',tip.x+7,tip.y-5,'#b9f5f2');
+    }
+
+    function drawTop(w,h) {
+      const q=state.phase,cq=Math.cos(q),sq=Math.sin(q);
+      const radius=Math.min(w*.42,h*.39), scale=radius/model.R, cx=w*.5,cy=h*.53;
+      ctx.fillStyle='#0b1822'; ctx.fillRect(cx-state.N*.65*scale,cy-state.N*.65*scale,state.N*1.3*scale,state.N*1.3*scale);
+      if(state.showGrooves){ctx.strokeStyle='rgba(83,215,219,.26)';ctx.lineWidth=1;for(let r=model.R*.18;r<model.R*.95;r+=model.R*.14){ctx.beginPath();ctx.arc(cx,cy,r*scale,0,Math.PI*2);ctx.stroke();}}
+      const cell=2*model.R/(model.rows.length-1)*scale*1.12;
+      for(const row of model.rows)for(const n of row){if(!n)continue;const p=pointAt(n,cq,sq);ctx.fillStyle=mix(p.z);ctx.fillRect(cx+n.x*scale-cell/2,cy+n.y*scale-cell/2,cell+.5,cell+.5);}
+      ctx.strokeStyle='rgba(153,240,235,.9)';ctx.lineWidth=2;ctx.beginPath();ctx.arc(cx,cy,radius,0,Math.PI*2);ctx.stroke();
+      if(state.showPins)for(const p of model.allPins){ctx.fillStyle=p.active?'rgba(23,64,86,.78)':'rgba(72,91,104,.28)';ctx.beginPath();ctx.arc(cx+p.x*scale,cy+p.y*scale,p.active?2.4:1.6,0,Math.PI*2);ctx.fill();}
+      if(state.showArrows){const visual=state.thickness*state.amplitude/(2*state.pitch*state.pitch)*scale*13;for(let j=3;j<model.rows.length-3;j+=6)for(let i=3;i<model.rows[j].length-3;i+=6){const n=model.rows[j][i];if(!n)continue;const p=pointAt(n,cq,sq),x=cx+p.x*scale,y=cy+p.y*scale;drawArrow(x,y,x-p.gx*visual,y-p.gy*visual,'rgba(238,246,250,.82)',1.15);}}
+      const ax=cx-model.d[0]*radius*.58,ay=cy-model.d[1]*radius*.58,bx=cx+model.d[0]*radius*.58,by=cy+model.d[1]*radius*.58;
+      drawArrow(ax,ay,bx,by,'#53d7db',2.3);drawLabel(ctx,`${state.psiDeg}°`,bx+7,by-5,'#b9f5f2');
+    }
+
+    function drawSection(w,h) {
+      const q=state.phase,cq=Math.cos(q),sq=Math.sin(q),left=w*.09,right=w*.93,mid=h*.55;
+      const xMin=-model.R,xMax=model.R,scaleX=(right-left)/(xMax-xMin),zAmp=Math.min(h*.22,88);
+      ctx.strokeStyle='rgba(84,118,139,.48)';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(left,mid);ctx.lineTo(right,mid);ctx.stroke();
+      if(state.showGrooves){ctx.strokeStyle='rgba(83,215,219,.26)';for(let r=.7;r<model.R;r+=.85){for(const sgn of [-1,1]){const x=left+(sgn*r-xMin)*scaleX;ctx.beginPath();ctx.moveTo(x,mid+32);ctx.lineTo(x,mid+43);ctx.stroke();}}}
+      const sample=[];
+      for(let s=xMin;s<=xMax+.001;s+=(xMax-xMin)/180){const x=s*model.d[0],y=s*model.d[1],c=model.evaluate(model.cc,x,y),ss=model.evaluate(model.cs,x,y);sample.push({s,z:c.z*cq+ss.z*sq});}
+      ctx.fillStyle='rgba(83,215,219,.18)';ctx.beginPath();ctx.moveTo(left,mid+30);for(const p of sample)ctx.lineTo(left+(p.s-xMin)*scaleX,mid-p.z*zAmp);ctx.lineTo(right,mid+30);ctx.closePath();ctx.fill();
+      ctx.strokeStyle='#7de3df';ctx.lineWidth=2.2;ctx.beginPath();sample.forEach((p,i)=>{const x=left+(p.s-xMin)*scaleX,y=mid-p.z*zAmp;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();
+      if(state.showPins){for(const p of model.pts){const s=p[0]*model.d[0]+p[1]*model.d[1];const cross=-p[0]*model.d[1]+p[1]*model.d[0];if(Math.abs(cross)>.45)continue;const wave=Math.cos(model.k*s-q),x=left+(s-xMin)*scaleX,y=mid-wave*zAmp;ctx.strokeStyle='rgba(77,143,255,.68)';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(x,mid+82);ctx.lineTo(x,y);ctx.stroke();ctx.fillStyle=wave>0?'#ffbd5b':'#4d8fff';ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();}}
+      drawArrow(left,mid-126,right-30,mid-126,'#53d7db',2);drawLabel(ctx,'進行方向 d(ψ)',left,mid-138,'#b9f5f2');
+      drawLabel(ctx,`λ = ${(state.pitch*state.m).toFixed(0)} mm`,left,mid+120,'#91a7b5');
+      drawLabel(ctx,'断面は操舵方位に沿って切断',right-188,mid+120,'#91a7b5');
+    }
+
+    function drawArrow(x1,y1,x2,y2,color,width){const a=Math.atan2(y2-y1,x2-x1),head=7+width*1.5;ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=width;ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();ctx.beginPath();ctx.moveTo(x2,y2);ctx.lineTo(x2-head*Math.cos(a-.42),y2-head*Math.sin(a-.42));ctx.lineTo(x2-head*Math.cos(a+.42),y2-head*Math.sin(a+.42));ctx.closePath();ctx.fill();}
+    function drawLabel(c,text,x,y,color){c.fillStyle=color;c.font='12px ui-sans-serif,system-ui,sans-serif';c.fillText(text,x,y);}
+
+    function draw() {
+      const {w,h}=resize();
+      const grad=ctx.createLinearGradient(0,0,0,h);grad.addColorStop(0,'#0e1d29');grad.addColorStop(1,'#071018');ctx.fillStyle=grad;ctx.fillRect(0,0,w,h);
+      if(!model)return;
+      if(state.view==='iso')drawIso(w,h);else if(state.view==='top')drawTop(w,h);else drawSection(w,h);
+      state.frameCount++;
+    }
+
+    function animate(now){const dt=Math.min(.05,(now-lastTime)/1000);lastTime=now;if(state.running&&model){state.phase=(state.phase+state.rpm*Math.PI*2/60*dt)%(Math.PI*2);syncPhase();}draw();requestAnimationFrame(animate);}
+    function syncPhase(){const deg=(state.phase*180/Math.PI+360)%360;document.getElementById('phase').value=deg;document.getElementById('phaseValue').textContent=`${deg.toFixed(0)}°`;}
+
+    const rebuildInputs=['gridN','waveRatio','steering','regularization'];
+    for(const id of rebuildInputs)document.getElementById(id).addEventListener('input',()=>{
+      state.N=+document.getElementById('gridN').value;state.m=+document.getElementById('waveRatio').value;state.psiDeg=+document.getElementById('steering').value;state.reg=+document.getElementById('regularization').value;
+      document.getElementById('steeringValue').textContent=`${state.psiDeg}°`;document.getElementById('regularizationValue').textContent=state.reg.toFixed(2);scheduleRebuild();
+    });
+    for(const id of ['pitch','thickness','amplitude','rpm'])document.getElementById(id).addEventListener('input',()=>{
+      state.pitch=+document.getElementById('pitch').value;state.thickness=+document.getElementById('thickness').value;state.amplitude=+document.getElementById('amplitude').value;state.rpm=+document.getElementById('rpm').value;
+      document.getElementById('pitchValue').textContent=`${state.pitch} mm`;document.getElementById('thicknessValue').textContent=`${state.thickness} mm`;document.getElementById('amplitudeValue').textContent=`${state.amplitude.toFixed(1)} mm`;document.getElementById('rpmValue').textContent=`${state.rpm} rpm`;updateMetrics();
+    });
+    document.getElementById('phase').addEventListener('input',e=>{state.running=false;state.phase=+e.target.value*Math.PI/180;document.getElementById('playButton').textContent='再生';document.getElementById('playButton').classList.remove('primary');document.getElementById('playButton').setAttribute('aria-pressed','false');syncPhase();});
+    document.getElementById('playButton').addEventListener('click',e=>{state.running=!state.running;e.currentTarget.textContent=state.running?'一時停止':'再生';e.currentTarget.classList.toggle('primary',state.running);e.currentTarget.setAttribute('aria-pressed',String(state.running));});
+    document.getElementById('stepButton').addEventListener('click',()=>{state.running=false;state.phase=(state.phase+Math.PI/12)%(Math.PI*2);const b=document.getElementById('playButton');b.textContent='再生';b.classList.remove('primary');b.setAttribute('aria-pressed','false');syncPhase();});
+    for(const b of document.querySelectorAll('[data-view]'))b.addEventListener('click',()=>{state.view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));});
+    for(const id of ['showPins','showGrooves','showArrows'])document.getElementById(id).addEventListener('change',e=>{state[id]=e.target.checked;});
+
+    const presets={
+      prototype:{N:12,m:6,pitch:20,thickness:10,amplitude:2,rpm:400,reg:1},
+      balanced:{N:12,m:6,pitch:25,thickness:10,amplitude:4,rpm:400,reg:1},
+      compact:{N:12,m:6,pitch:12.5,thickness:6,amplitude:2,rpm:500,reg:1}
+    };
+    for(const b of document.querySelectorAll('[data-preset]'))b.addEventListener('click',()=>{
+      Object.assign(state,presets[b.dataset.preset]);
+      const values={gridN:state.N,waveRatio:state.m,pitch:state.pitch,thickness:state.thickness,amplitude:state.amplitude,rpm:state.rpm,regularization:state.reg};
+      for(const [id,v] of Object.entries(values))document.getElementById(id).value=v;
+      document.getElementById('pitchValue').textContent=`${state.pitch} mm`;document.getElementById('thicknessValue').textContent=`${state.thickness} mm`;document.getElementById('amplitudeValue').textContent=`${state.amplitude.toFixed(1)} mm`;document.getElementById('rpmValue').textContent=`${state.rpm} rpm`;document.getElementById('regularizationValue').textContent=state.reg.toFixed(2);scheduleRebuild();
+    });
+
+    let dragging=false,lastX=0;
+    canvas.addEventListener('pointerdown',e=>{if(state.view!=='iso')return;dragging=true;lastX=e.clientX;canvas.setPointerCapture(e.pointerId);});
+    canvas.addEventListener('pointermove',e=>{if(!dragging)return;state.azimuth+=(e.clientX-lastX)*.008;lastX=e.clientX;});
+    canvas.addEventListener('pointerup',()=>{dragging=false;});
+    canvas.addEventListener('pointercancel',()=>{dragging=false;});
+    window.addEventListener('resize',draw);
+
+    window.mappingSimDiagnostics=()=>({
+      modelReady:state.modelReady,frameCount:state.frameCount,N:state.N,m:state.m,pinCount:model?.metrics.pinCount,
+      gainP05:model?.metrics.gainP05,leakageP95:model?.metrics.leakageP95,
+      derived:derived(),finite:model?Object.values(model.metrics).every(Number.isFinite):false
+    });
+    scheduleRebuild();requestAnimationFrame(animate);
+  })();
+  </script>
+</body>
+</html>
