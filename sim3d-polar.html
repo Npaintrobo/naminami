@@ -1,0 +1,1083 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>和差位相式・偏極操舵波動面 3Dシミュレータ</title>
+<style>
+  :root {
+    --ground: #0A0E0D;
+    --panel: rgba(17, 24, 22, 0.9);
+    --hair: #26322F;
+    --ink: #DCE6E3;
+    --muted: #7F908C;
+    --x: #2AA5B0;
+    --y: #D2912F;
+    --cmd: #8C7BE0;
+    --warn: #E87A5C;
+    --sans: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic UI", sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  #stage { position: fixed; inset: 0; }
+
+  canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: grab;
+  }
+
+  canvas.dragging { cursor: grabbing; }
+
+  .hud {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    padding: 16px 20px;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+    pointer-events: none;
+    background: linear-gradient(180deg, rgba(10,14,13,0.86), rgba(10,14,13,0));
+  }
+
+  .title { margin: 0; font-size: 0.98rem; font-weight: 700; letter-spacing: 0.02em; }
+  .subtitle { margin: 3px 0 0; font-size: 0.76rem; color: var(--muted); }
+
+  .readout { display: flex; gap: 20px; flex-wrap: wrap; justify-content: flex-end; }
+  .cell { text-align: right; }
+
+  .cell dt {
+    margin: 0 0 2px;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .cell dd { margin: 0; font-family: var(--mono); font-size: 0.95rem; font-variant-numeric: tabular-nums; }
+  .cell.x dd { color: var(--x); }
+  .cell.y dd { color: var(--y); }
+  .cell.err dd.bad { color: var(--warn); }
+
+  .panel {
+    position: fixed;
+    left: 20px;
+    bottom: 20px;
+    width: 312px;
+    max-width: calc(100vw - 40px);
+    padding: 16px 18px 18px;
+    background: var(--panel);
+    border: 1px solid var(--hair);
+    border-radius: 4px;
+    backdrop-filter: blur(14px);
+    display: grid;
+    gap: 13px;
+  }
+
+  .grp { display: grid; gap: 7px; }
+
+  .grp-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 0.76rem;
+    color: var(--muted);
+  }
+
+  .grp-head b {
+    font-family: var(--mono);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  .grp.ax-x .grp-head b { color: var(--x); }
+  .grp.ax-y .grp-head b { color: var(--y); }
+
+  input[type="range"] { width: 100%; margin: 0; accent-color: var(--x); cursor: pointer; }
+  .grp.ax-y input[type="range"] { accent-color: var(--y); }
+
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+  .seg button {
+    padding: 7px 6px;
+    font-family: var(--sans);
+    font-size: 0.76rem;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--hair);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+
+  .seg button[aria-pressed="true"] { color: var(--ink); border-color: var(--x); background: rgba(42,165,176,0.14); }
+
+  .checks { display: grid; gap: 9px; padding-top: 12px; border-top: 1px solid var(--hair); }
+
+  label.chk {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 0.79rem;
+    cursor: pointer;
+  }
+
+  label.chk input { accent-color: var(--x); margin: 0; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row button:last-child { grid-column: 1 / -1; }
+
+  button.act {
+    padding: 8px 10px;
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    color: var(--ink);
+    background: transparent;
+    border: 1px solid var(--hair);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+
+  button.act:hover { border-color: var(--muted); }
+  button:focus-visible { outline: 2px solid var(--x); outline-offset: 2px; }
+
+  .note {
+    margin: 0;
+    padding: 9px 11px;
+    font-size: 0.72rem;
+    line-height: 1.6;
+    color: var(--warn);
+    background: rgba(232,122,92,0.1);
+    border: 1px solid rgba(232,122,92,0.4);
+    border-radius: 3px;
+  }
+
+  .note[hidden] { display: none; }
+
+  .note.info {
+    color: var(--muted);
+    background: rgba(255, 255, 255, 0.04);
+    border-color: var(--hair);
+  }
+
+  .legend {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    display: grid;
+    gap: 7px;
+    font-size: 0.74rem;
+    color: var(--muted);
+    text-align: right;
+    pointer-events: none;
+  }
+
+  .legend span { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; }
+  .dash { width: 18px; height: 0; border-top: 2px dashed var(--cmd); }
+
+  @media (max-width: 780px) {
+    .hud { flex-direction: column; align-items: flex-start; gap: 10px; }
+    .readout { justify-content: flex-start; gap: 14px; }
+    .cell { text-align: left; }
+    .panel { left: 10px; right: 10px; bottom: 10px; width: auto; }
+    .legend { display: none; }
+    #bSheet { display: block; grid-column: 1 / -1; }
+    .panel.collapsed > *:not(#bSheet) { display: none; }
+  }
+
+  #bSheet { display: none; }
+
+  .seg.three { grid-template-columns: 1fr 1fr 1fr; }
+  .panel[data-mode="disc"] .only-xy { display: none; }
+  .panel:not([data-mode="disc"]) .only-disc { display: none; }
+</style>
+
+<body>
+
+<div id="stage"><canvas id="view"></canvas></div>
+
+<div class="hud">
+  <div>
+    <p class="title">和差位相式・偏極操舵波動面</p>
+    <p class="subtitle">2軸の和が波を進め、差が推力方向を回す。ドラッグで回転、ホイールでズーム</p>
+  </div>
+  <dl class="readout">
+    <div class="cell x"><dt>A軸 rpm</dt><dd id="rA">0</dd></div>
+    <div class="cell y"><dt>B軸 rpm</dt><dd id="rB">0</dd></div>
+    <div class="cell"><dt>波 q&#775; rpm</dt><dd id="rQ">0</dd></div>
+    <div class="cell"><dt>偏極角 &psi;</dt><dd id="rPsi">0&deg;</dd></div>
+    <div class="cell"><dt>速度</dt><dd id="rV">0 mm/s</dd></div>
+    <div class="cell err"><dt>方向誤差</dt><dd id="rErr">&mdash;</dd></div>
+    <div class="cell"><dt>滑り</dt><dd id="rSlip">0 %</dd></div>
+    <div class="cell"><dt>傾き</dt><dd id="rTilt">0.00&deg;</dd></div>
+    <div class="cell"><dt>走行距離</dt><dd id="rDist">0.0 m</dd></div>
+  </dl>
+</div>
+
+<div class="panel" id="panel">
+  <button class="act" id="bSheet">操作パネルを開く</button>
+
+  <div class="grp">
+    <div class="grp-head"><span>運転</span></div>
+    <div class="seg three">
+      <button id="pStraight" aria-pressed="true">直進</button>
+      <button id="pSteer" aria-pressed="false">操舵中</button>
+      <button id="pTurn" aria-pressed="false">波を止めて操舵</button>
+    </div>
+  </div>
+
+  <div class="grp ax-x">
+    <div class="grp-head"><span>A軸 &phi;&#775;<sub>A</sub></span><b id="vA">2.00</b></div>
+    <input type="range" id="sA" min="-3" max="3" step="0.05" value="2">
+  </div>
+  <div class="grp ax-y">
+    <div class="grp-head"><span>B軸 &phi;&#775;<sub>B</sub></span><b id="vB">2.00</b></div>
+    <input type="range" id="sB" min="-3" max="3" step="0.05" value="2">
+  </div>
+
+  <div class="grp">
+    <div class="grp-head"><span>位相ステップ &Delta;&phi;</span><b id="vP">60&deg;</b></div>
+    <input type="range" id="sP" min="10" max="120" step="5" value="60">
+  </div>
+
+  <div class="grp">
+    <div class="grp-head"><span>波数ベクトル k の向き</span></div>
+    <div class="seg">
+      <button id="bKd" aria-pressed="true">斜め（推奨）</button>
+      <button id="bKx" aria-pressed="false">軸に平行</button>
+    </div>
+  </div>
+
+  <div class="grp">
+    <div class="grp-head"><span>面内振幅 a</span><b id="vAmp">6.0 mm</b></div>
+    <input type="range" id="sAmp" min="1" max="20" step="0.5" value="6">
+  </div>
+  <div class="grp">
+    <div class="grp-head"><span>上下振幅 b</span><b id="vB2">6.0 mm</b></div>
+    <input type="range" id="sB2" min="0.4" max="12" step="0.2" value="6">
+  </div>
+
+  <div class="grp">
+    <div class="grp-head"><span>パッドの沈み込み &delta;p（未実測の最大の不確かさ）</span><b id="vDp">0.30 mm</b></div>
+    <input type="range" id="sDp" min="0.1" max="2" step="0.05" value="0.3">
+  </div>
+
+  <div class="grp">
+    <div class="grp-head"><span>運動を誇張して見る（表示のみ）</span><b id="vX">&times;1.0</b></div>
+    <input type="range" id="sX" min="1" max="8" step="0.5" value="1">
+  </div>
+
+  <div class="checks">
+    <label class="chk"><input type="checkbox" id="cMech" checked> 逆旋回2偏心のアームを表示</label>
+    <label class="chk"><input type="checkbox" id="cEdge" checked> 稜線を描く</label>
+  </div>
+
+  <div class="row">
+    <button class="act" id="bReset">原点へ戻す</button>
+    <button class="act" id="bView">視点を戻す</button>
+    <button class="act" id="bPause">一時停止</button>
+  </div>
+
+  <p class="note" id="note" hidden></p>
+</div>
+
+<div class="legend">
+  <span>A偏心<i class="swatch" style="background:#2AA5B0"></i></span>
+  <span>B偏心<i class="swatch" style="background:#D2912F"></i></span>
+  <span>偏極方向 &psi;<i class="dash"></i></span>
+</div>
+
+<script>
+
+(() => {
+  "use strict";
+
+  /* ================================================================
+     運動学
+
+       theta_i = k.r_i - q                     搬送波位相
+       z_i     = -b cos(theta_i)               上下（歯は下向きなので負が下）
+       p_i     =  a sin(theta_i) [cos psi, sin psi]     面内（偏極）
+
+       q   = (phiA + phiB) / 2
+       psi = (phiA - phiB) / 2
+
+     面内は逆旋回する2つの偏心の和で作る。恒等式は
+
+       u+(th+psi-pi/2) + u-(th-psi-pi/2) = 2 sin(th) [cos psi, sin psi]
+
+     -pi/2 のクロッキングが要る。これが無いと cos(th) になり、z と同位相に
+     なって山での面内速度がゼロ、つまり推力がまったく出ない。
+     ================================================================ */
+
+  const spec = { n: 12, pitch: 50, size: 600, half: 300, rpm: 300,
+                 a: 6, b: 6, dp: 0.3, dphi: 60 * Math.PI / 180, kdiag: true };
+  const geo = { chassisTop: 260, tile: 150 };
+
+  const MU = 0.6, GRAV = 9810;  // 摩擦係数、重力加速度 [mm/s^2]
+  const MU_G = MU * GRAV;
+  const VEPS = 6;               // 静止摩擦へ移る滑り速度の幅 [mm/s]
+  const MASS = 20, HCG = 100;   // 機体質量 [kg]、重心高さ [mm]
+  /* 接地ばねは接触子の本数で変わる。定数のままだと本数を変えたときに機体が沈み、
+     山から遠い（面内速度が逆向きの）接触子まで荷重を持って推力が相殺される。
+     静的な沈み込みが常に spec.dp になるように整定する。 */
+  let KC = 47, CC = 0.15;       // 接地ばね [N/mm]、減衰 [N.s/mm]
+
+  function tune() {
+    const nc = Math.max(3, Math.round(pads.length * 0.12));   // 同時接地する本数の目安
+    KC = (MASS * GRAV / ACC) / (nc * spec.dp);
+    CC = 2 * 0.35 * Math.sqrt(nc * KC * 1000 * MASS) / 1000 / nc;
+  }
+  const ACC = 1000;             // N, kg -> mm/s^2
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  const shaft = { a: 2, b: 2 };                 // -3..3
+  let phiA = 0, phiB = 0;
+  /* 上下・ピッチ・ロールを持たせる。これが無いと k を軸に平行にしたときの
+     線接触と首振りが出ず、k の向きの善し悪しが見えない。
+     ヨーは入れていない（軸平行の箱で描いているため）。6自由度版は bench/polar.mjs。 */
+  const car = { x: 0, z: 0, ride: 0, y: 0, tx: 0, tz: 0 };
+  const vel = { x: 0, z: 0, y: 0, wx: 0, wz: 0 };
+  const view = { yaw: 0.72, pitch: 0.5, dist: 1400 };
+  const opt = { mech: true, edge: true, paused: false, exag: 1 };
+  const live = { q: 0, qd: 0, psi: 0, psid: 0, slip: 0, dist: 0, contact: 0, load: 1 };
+  const trail = [];
+
+  const omegaOf = s => shaft[s] / 3 * spec.rpm * Math.PI / 30;
+  const rpmOf = s => Math.abs(shaft[s]) / 3 * spec.rpm;
+
+  const pads = [];
+
+  function buildPads() {
+    pads.length = 0;
+    const off = -spec.half + spec.pitch * 0.5;
+    for (let i = 0; i < spec.n; i += 1) {
+      for (let j = 0; j < spec.n; j += 1) {
+        pads.push({ x: off + i * spec.pitch, z: off + j * spec.pitch,
+                    ph: (spec.kdiag ? i + j : i) * spec.dphi,
+                    th: 0, y: 0, n: 0, ox: 0, oz: 0, prev: 0 });
+      }
+    }
+    tune();
+  }
+
+  function advance(dt) {
+    const wA = omegaOf("a"), wB = omegaOf("b");
+    phiA += wA * dt;
+    phiB += wB * dt;
+
+    const q = (phiA + phiB) / 2, qd = (wA + wB) / 2;
+    const psi = (phiA - phiB) / 2, psid = (wA - wB) / 2;
+    const cw = Math.cos(psi), sw = Math.sin(psi);
+
+    const L = spec.n * spec.pitch;
+    const Ih = MASS * (L * L / 12 + HCG * HCG);
+
+    let Fx = 0, Fz = 0, SN = 0, Tx = 0, Tz = 0, sl = 0, wsum = 0, cnt = 0;
+
+    for (const p of pads) {
+      p.th = p.ph - q;
+      p.y = -spec.b * Math.cos(p.th);
+
+      /* 歯先の世界高さ。傾きは小角で線形化する */
+      const pen = -(car.y + p.y - car.tx * p.z + car.tz * p.x);
+      if (pen <= 0) { p.prev = 0; p.n = 0; continue; }
+
+      const Nf = Math.max(0, KC * pen + CC * (pen - p.prev) / dt);
+      p.prev = pen;
+      p.n = Nf;
+      if (Nf <= 0) continue;
+      cnt += 1;
+      SN += Nf;
+
+      const cs = Math.cos(p.th), sn = Math.sin(p.th);
+      /* 面内速度。第1項が推力、第2項は操舵中だけ出る横成分で山では消える */
+      const ux = -spec.a * qd * cs * cw - spec.a * psid * sn * sw;
+      const uz = -spec.a * qd * cs * sw + spec.a * psid * sn * cw;
+      const gx = vel.x + ux, gz = vel.z + uz;
+      const m = Math.max(Math.hypot(gx, gz), VEPS);
+      const fx = -MU * Nf * gx / m, fz = -MU * Nf * gz / m;
+      Fx += fx; Fz += fz;
+      Tx += -HCG * fz - p.z * Nf;
+      Tz += p.x * Nf + HCG * fx;
+      sl += Nf * Math.hypot(gx, gz);
+      wsum += Nf;
+    }
+
+    live.q = q; live.qd = qd; live.psi = psi; live.psid = psid;
+    live.contact = cnt;
+    live.load = SN / (MASS * GRAV / ACC);         // 法線力の合計 / 重量
+
+    vel.x += ACC * Fx / MASS * dt;
+    vel.z += ACC * Fz / MASS * dt;
+    vel.y += (ACC * SN / MASS - GRAV) * dt;
+    vel.wx += ACC * Tx / Ih * dt;
+    vel.wz += ACC * Tz / Ih * dt;
+
+    car.x += vel.x * dt;
+    car.z += vel.z * dt;
+    car.y += vel.y * dt;
+    car.tx += vel.wx * dt;
+    car.tz += vel.wz * dt;
+
+    live.slip = wsum > 0 ? sl / wsum : 0;
+    live.dist += Math.hypot(vel.x, vel.z) * dt;
+  }
+
+  function step(dt) {
+    /* 位相の細かさと、摩擦の正則化帯 VEPS/(mu g) の両方より細かく刻む */
+    const fastest = Math.max(Math.abs(omegaOf("a")), Math.abs(omegaOf("b")), 1e-6);
+    const band = VEPS / MU_G * 0.25;
+    const steps = clamp(Math.max(Math.ceil(fastest * dt / 0.035), Math.ceil(dt / band)), 1, 240);
+    const slice = dt / steps;
+    for (let s = 0; s < steps; s += 1) advance(slice);
+
+    car.ride = car.y * opt.exag;
+    const cw = Math.cos(live.psi), sw = Math.sin(live.psi);
+    for (const p of pads) {
+      const s = spec.a * Math.sin(p.th) * opt.exag;
+      p.ox = s * cw;
+      p.oz = s * sw;
+    }
+
+    const last = trail[trail.length - 1];
+    if (!last || Math.hypot(last.x - car.x, last.z - car.z) > spec.pitch * 0.25) {
+      trail.push({ x: car.x, z: car.z });
+      if (trail.length > 600) trail.shift();
+    }
+  }
+  /* ================================================================
+     直方体レンダラ（画家のアルゴリズム）
+     ================================================================ */
+  const canvas = document.getElementById("view");
+  const ctx = canvas.getContext("2d");
+
+  const MAX_FACES = 24576;
+  const fDepth = new Float64Array(MAX_FACES);
+  const fPts = new Float32Array(MAX_FACES * 8);
+  const fMat = new Int32Array(MAX_FACES);
+  const fArea = new Float32Array(MAX_FACES);
+  const order = new Uint32Array(MAX_FACES);
+  let faceCount = 0, groundCount = 0;
+
+  const FACE_IDX = [[1,3,7,5], [0,4,6,2], [2,3,7,6], [0,1,5,4], [4,5,7,6], [0,2,3,1]];
+  const LIGHT = (() => { const v = [-0.34, 1, 0.42]; const m = Math.hypot(v[0], v[1], v[2]); return v.map(c => c / m); })();
+  const NORMALS = [[1,0,0], [-1,0,0], [0,1,0], [0,-1,0], [0,0,1], [0,0,-1]];
+  const SHADE = NORMALS.map(n => 0.30 + 0.70 * Math.max(0, n[0]*LIGHT[0] + n[1]*LIGHT[1] + n[2]*LIGHT[2]));
+
+  const fill = [], edge = [];
+
+  function material(r, g, b) {
+    const id = fill.length / 6;
+    for (let f = 0; f < 6; f += 1) {
+      const s = SHADE[f];
+      fill.push(`rgb(${Math.round(r*s)},${Math.round(g*s)},${Math.round(b*s)})`);
+      edge.push(`rgb(${Math.round(r*s*0.55)},${Math.round(g*s*0.55)},${Math.round(b*s*0.55)})`);
+    }
+    return id;
+  }
+
+  let ex = 0, ey = 0, ez = 0, rx = 1, ry = 0, rz = 0;
+  let ux = 0, uy = 1, uz = 0, fx = 0, fy = 0, fz = 1;
+  let focal = 900, cx = 0, cy = 0, minArea = 2, edgeMinArea = 90, spanX = 1e5, spanY = 1e5;
+
+  const VX = new Float64Array(8), VY = new Float64Array(8), VZ = new Float64Array(8);
+
+  function box(px, py, pz, hx, hy, hz, mat) {
+    for (let k = 0; k < 8; k += 1) {
+      const dx = px + (k & 1 ? hx : -hx) - ex;
+      const dy = py + (k & 2 ? hy : -hy) - ey;
+      const dz = pz + (k & 4 ? hz : -hz) - ez;
+      VX[k] = dx*rx + dy*ry + dz*rz;
+      VY[k] = dx*ux + dy*uy + dz*uz;
+      VZ[k] = dx*fx + dy*fy + dz*fz;
+    }
+
+    const vis = [px + hx - ex < 0, ex - (px - hx) < 0,
+                 py + hy - ey < 0, ey - (py - hy) < 0,
+                 pz + hz - ez < 0, ez - (pz - hz) < 0];
+
+    for (let f = 0; f < 6; f += 1) {
+      if (!vis[f] || faceCount >= MAX_FACES) continue;
+      const idx = FACE_IDX[f];
+      let depth = 0, ok = true;
+      for (let c = 0; c < 4; c += 1) {
+        if (VZ[idx[c]] < 60) { ok = false; break; }
+        depth += VZ[idx[c]];
+      }
+      if (!ok) continue;
+
+      const base = faceCount * 8;
+      for (let c = 0; c < 4; c += 1) {
+        const k = idx[c], inv = focal / VZ[k];
+        fPts[base + c*2] = cx + VX[k] * inv;
+        fPts[base + c*2 + 1] = cy - VY[k] * inv;
+      }
+
+      // 投影後に潰れている面は捨てる（実機プリセットは歯が千個を超える）
+      const area = Math.abs(
+        (fPts[base+2] - fPts[base]) * (fPts[base+5] - fPts[base+1]) -
+        (fPts[base+4] - fPts[base]) * (fPts[base+3] - fPts[base+1]));
+      if (area < minArea) continue;
+
+      let inside = false;
+      for (let c = 0; c < 4 && !inside; c += 1) {
+        if (Math.abs(fPts[base + c*2] - cx) < spanX && Math.abs(fPts[base + c*2 + 1] - cy) < spanY) inside = true;
+      }
+      if (!inside) continue;
+
+      fArea[faceCount] = area;
+      fDepth[faceCount] = depth;
+      fMat[faceCount] = mat * 6 + f;
+      faceCount += 1;
+    }
+  }
+
+  const qx = new Float64Array(4), qy = new Float64Array(4);
+
+  /* 地面のタイルは上面しか見えない。直方体だと6倍の面を積むので1枚で描く。 */
+  function quad(x0, z0, x1, z1, y, mat) {
+    let depth = 0;
+    const px = [x0, x1, x1, x0], pz = [z0, z0, z1, z1];
+
+    for (let c = 0; c < 4; c += 1) {
+      const dx = px[c] - ex, dy = y - ey, dz = pz[c] - ez;
+      const vz = dx*fx + dy*fy + dz*fz;
+      if (vz < 60) return;
+      depth += vz;
+      const inv = focal / vz;
+      qx[c] = cx + (dx*rx + dy*ry + dz*rz) * inv;
+      qy[c] = cy - (dx*ux + dy*uy + dz*uz) * inv;
+    }
+
+    if (faceCount >= MAX_FACES) return;
+
+    let inside = false;
+    for (let c = 0; c < 4 && !inside; c += 1) {
+      if (Math.abs(qx[c] - cx) < spanX && Math.abs(qy[c] - cy) < spanY) inside = true;
+    }
+    if (!inside) return;
+
+    const base = faceCount * 8;
+    for (let c = 0; c < 4; c += 1) { fPts[base + c*2] = qx[c]; fPts[base + c*2 + 1] = qy[c]; }
+    fArea[faceCount] = 1e6;                     // 地面のタイルは常に稜線を引く
+    fDepth[faceCount] = depth;
+    fMat[faceCount] = mat * 6 + 2;              // +y 面の陰影を使う
+    faceCount += 1;
+  }
+
+  const PX = new Float64Array(16), PY = new Float64Array(16);
+
+  /* 傾いた円盤は軸平行の直方体では描けない。凸多角形を三角形扇に割って積む。
+     面バッファは1面4点なので、三角形は最後の点を重ねて詰める。 */
+  function polyFan(pts, n, mat, faceIdx) {
+    let depth = 0, inside = false;
+
+    for (let k = 0; k < n; k += 1) {
+      const dx = pts[k*3] - ex, dy = pts[k*3+1] - ey, dz = pts[k*3+2] - ez;
+      const vz = dx*fx + dy*fy + dz*fz;
+      if (vz < 60) return;
+      const inv = focal / vz;
+      PX[k] = cx + (dx*rx + dy*ry + dz*rz) * inv;
+      PY[k] = cy - (dx*ux + dy*uy + dz*uz) * inv;
+      depth += vz;
+      if (Math.abs(PX[k] - cx) < spanX && Math.abs(PY[k] - cy) < spanY) inside = true;
+    }
+    if (!inside) return;
+    depth /= n;
+
+    for (let k = 1; k < n - 1; k += 1) {
+      if (faceCount >= MAX_FACES) return;
+      const a = Math.abs((PX[k]-PX[0])*(PY[k+1]-PY[0]) - (PX[k+1]-PX[0])*(PY[k]-PY[0])) * 0.5;
+      if (a < minArea) continue;
+      const b = faceCount * 8;
+      fPts[b] = PX[0];   fPts[b+1] = PY[0];
+      fPts[b+2] = PX[k]; fPts[b+3] = PY[k];
+      fPts[b+4] = PX[k+1]; fPts[b+5] = PY[k+1];
+      fPts[b+6] = PX[0]; fPts[b+7] = PY[0];
+      fArea[faceCount] = a;
+      fDepth[faceCount] = depth;
+      fMat[faceCount] = mat * 6 + faceIdx;
+      faceCount += 1;
+    }
+  }
+
+  const pt = [0, 0];
+
+  function project(px, py, pz, out) {
+    const dx = px - ex, dy = py - ey, dz = pz - ez;
+    const vz = dx*fx + dy*fy + dz*fz;
+    if (vz < 60) return false;
+    out[0] = cx + (dx*rx + dy*ry + dz*rz) * focal / vz;
+    out[1] = cy - (dx*ux + dy*uy + dz*uz) * focal / vz;
+    return true;
+  }
+
+  /* ================================================================
+     シーン
+     ================================================================ */
+  /* 上の板は半透明にする。不透明だと機構が完全に隠れて何も見えない。
+     ペインタ順で手前に描かれるので、そのまま下の層に重なる。 */
+  function materialA(r, g, b, al) {
+    const id = fill.length / 6;
+    for (let f = 0; f < 6; f += 1) {
+      const sh = SHADE[f];
+      fill.push(`rgba(${Math.round(r*sh)},${Math.round(g*sh)},${Math.round(b*sh)},${al})`);
+      edge.push(`rgba(${Math.round(r*sh*0.7)},${Math.round(g*sh*0.7)},${Math.round(b*sh*0.7)},${Math.min(1, al + 0.45)})`);
+    }
+    return id;
+  }
+
+  /* 荷重を持っている接触子が見えるように、法線力で色を振る */
+  const RAMP_PAD = (() => {
+    const ids = [];
+    for (let k = 0; k < 8; k += 1) {
+      const t = k / 7;
+      ids.push(material(58 + 190 * t, 70 + 176 * t, 68 + 172 * t));
+    }
+    return ids;
+  })();
+
+  const MAT_POST   = material(92, 104, 101);
+  const MAT_HUB    = material(140, 152, 148);
+  const MAT_ARM_A  = material(42, 165, 176);
+  const MAT_ARM_B  = material(210, 145, 47);
+  const MAT_PLATE  = materialA(120, 140, 136, 0.20);
+  const MAT_SKIN   = materialA(150, 170, 165, 0.22);
+  const MAT_TILE_A = material(19, 25, 24);
+  const MAT_TILE_B = material(27, 35, 33);
+
+  const AP = new Float64Array(12);
+
+  /* 水平面内の細長い長方形。box() は軸平行しか描けないので凸多角形で積む */
+  function armQuad(x0, z0, x1, z1, y, w, mat) {
+    const dx = x1 - x0, dz = z1 - z0;
+    const m = Math.hypot(dx, dz) || 1;
+    const nx = -dz / m * w, nz = dx / m * w;
+    AP[0] = x0 + nx; AP[1] = y; AP[2] = z0 + nz;
+    AP[3] = x1 + nx; AP[4] = y; AP[5] = z1 + nz;
+    AP[6] = x1 - nx; AP[7] = y; AP[8] = z1 - nz;
+    AP[9] = x0 - nx; AP[10] = y; AP[11] = z0 - nz;
+    polyFan(AP, 4, mat, 2);
+  }
+
+  /* 機体は傾くので、板は軸平行の箱では描けない。四隅の高さを傾きから出して四角形で積む。 */
+  const TQ = new Float64Array(12);
+  function tiltQuad(hx, hz, y0, mat) {
+    const cs = [[-hx, -hz], [hx, -hz], [hx, hz], [-hx, hz]];
+    for (let k = 0; k < 4; k += 1) {
+      const [dx, dz] = cs[k];
+      TQ[k*3]     = car.x + dx;
+      TQ[k*3 + 1] = y0 - car.tx * dz + car.tz * dx;
+      TQ[k*3 + 2] = car.z + dz;
+    }
+    const before = faceCount;
+    polyFan(TQ, 4, mat, 2);
+    /* polyFan は四角形を三角形2枚に割るので、そのままだと内部の対角線が
+       稜線として描かれてしまう。板は面積を 0 にして稜線を抑える。 */
+    for (let f = before; f < faceCount; f += 1) fArea[f] = 0;
+  }
+
+  function buildGround() {
+    const t = geo.tile, n = 9;
+    const ox = Math.round(car.x / (2 * t)) * 2 * t;
+    const oz = Math.round(car.z / (2 * t)) * 2 * t;
+    for (let i = -n; i <= n; i += 1) {
+      for (let j = -n; j <= n; j += 1) {
+        const gx = ox + i * t, gz = oz + j * t;
+        quad(gx - t/2, gz - t/2, gx + t/2, gz + t/2, 0, ((i + j) & 1) ? MAT_TILE_A : MAT_TILE_B);
+      }
+    }
+    groundCount = faceCount;
+  }
+
+  function buildMachine() {
+    const padR = spec.pitch * 0.20, padH = spec.pitch * 0.07;
+    /* 誇張しても最下点（p.y = -b）の高さが変わらないように下駄を履かせる */
+    const lift = spec.b * (opt.exag - 1);
+    const deck = car.y + spec.b * (2 * opt.exag - 1) + padH * 2;
+    /* 下から パッド → アーム → スキン → 板 の順。アームは機構の中なのでスキンより下。 */
+    const hubY = deck + spec.pitch * 0.14;
+    const skinY = deck + spec.pitch * 0.40;
+    const plateY = skinY + spec.pitch * 0.34;
+    geo.chassisTop = plateY + spec.pitch * 0.26;
+
+    const armL = spec.a * 0.5 * opt.exag;
+    const armW = Math.max(1.6, spec.pitch * 0.022);
+    const tilt = (x, z) => -car.tx * z + car.tz * x;
+
+    for (const p of pads) {
+      const tipY = car.y + p.y * opt.exag + lift + tilt(p.x, p.z);
+      const cxp = p.x + car.x + p.ox, czp = p.z + car.z + p.oz;
+      const hy = hubY + tilt(p.x, p.z);
+
+      const lit = RAMP_PAD[clamp(Math.round(p.n / (MASS * GRAV / ACC / 6) * 7), 0, 7)];
+      box(cxp, tipY + padH, czp, padR, padH, padR, lit);
+      box(cxp, (tipY + padH * 2 + hy) * 0.5, czp,
+          padR * 0.26, Math.max(1, (hy - tipY - padH * 2) * 0.5), padR * 0.26, MAT_POST);
+
+      if (!opt.mech) continue;
+
+      /* 逆旋回する2つの偏心。A は角 (th + psi - pi/2)、B は角 (psi - th + pi/2)。
+         2本を継いだ先端がそのままパッドの面内変位 a.sin(th).[cos psi, sin psi] になる。 */
+      const nx = p.x + car.x, nz = p.z + car.z;
+      const aA = p.th + live.psi - Math.PI / 2;
+      const jx = nx + Math.cos(aA) * armL, jz = nz + Math.sin(aA) * armL;
+      armQuad(nx, nz, jx, jz, hy, armW, MAT_ARM_A);
+      armQuad(jx, jz, cxp, czp, hy, armW, MAT_ARM_B);
+      box(nx, hy, nz, armW * 1.8, armW * 1.4, armW * 1.8, MAT_HUB);
+      box(cxp, hy, czp, armW * 1.6, armW * 1.2, armW * 1.6, MAT_HUB);
+    }
+
+    // 連続スキン（面内せん断を受ける膜）と上の板
+    tiltQuad(spec.half, spec.half, skinY, MAT_SKIN);
+    tiltQuad(spec.half * 0.96, spec.half * 0.96, plateY, MAT_PLATE);
+    tiltQuad(spec.half * 0.5, spec.half * 0.5, geo.chassisTop, MAT_PLATE);
+  }
+
+  function build() {
+    faceCount = 0;
+    buildGround();
+    buildMachine();
+  }
+
+  function paintOverlay() {
+    if (trail.length > 1) {
+      ctx.beginPath();
+      let started = false;
+      const bound = Math.max(canvas.width, canvas.height) * 1.4;
+      for (let n = 0; n < trail.length; n += 1) {
+        if (!project(trail[n].x, 1, trail[n].z, pt) ||
+            Math.abs(pt[0] - cx) > bound || Math.abs(pt[1] - cy) > bound) { started = false; continue; }
+        if (started) ctx.lineTo(pt[0], pt[1]); else { ctx.moveTo(pt[0], pt[1]); started = true; }
+      }
+      ctx.strokeStyle = "rgba(255,255,255,0.55)";
+      ctx.lineWidth = Math.max(1.5, dpr() * 1.3);
+      ctx.setLineDash([]);
+      ctx.stroke();
+    }
+
+    if (Math.abs(live.qd) < 1e-6) return;
+    const len = spec.size * 2.2;
+    const okA = project(car.x, 1, car.z, pt);
+    const x0 = pt[0], y0 = pt[1];
+    const okB = project(car.x + Math.cos(live.psi) * len, 1, car.z + Math.sin(live.psi) * len, pt);
+    if (!okA || !okB) return;
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(pt[0], pt[1]);
+    ctx.strokeStyle = "rgba(140,123,224,0.95)";
+    ctx.lineWidth = Math.max(1.5, dpr() * 1.4);
+    ctx.setLineDash([10 * dpr(), 8 * dpr()]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  /* ================================================================
+     描画
+     ================================================================ */
+  function camera() {
+    const cp = Math.cos(view.pitch), sp = Math.sin(view.pitch);
+    const tx = car.x, ty = geo.chassisTop * 0.5, tz = car.z;
+
+    ex = tx + view.dist * cp * Math.sin(view.yaw);
+    ey = ty + view.dist * sp;
+    ez = tz + view.dist * cp * Math.cos(view.yaw);
+
+    let dx = tx - ex, dy = ty - ey, dz = tz - ez;
+    let m = Math.hypot(dx, dy, dz);
+    fx = dx / m; fy = dy / m; fz = dz / m;
+
+    rx = -fz; ry = 0; rz = fx;
+    m = Math.hypot(rx, rz) || 1;
+    rx /= m; rz /= m;
+
+    ux = ry*fz - rz*fy;
+    uy = rz*fx - rx*fz;
+    uz = rx*fy - ry*fx;
+  }
+
+  let edgesOn = true;
+
+  function paint(list) {
+    for (let n = 0; n < list.length; n += 1) {
+      const f = list[n], b = f * 8;
+      ctx.beginPath();
+      ctx.moveTo(fPts[b], fPts[b+1]);
+      ctx.lineTo(fPts[b+2], fPts[b+3]);
+      ctx.lineTo(fPts[b+4], fPts[b+5]);
+      ctx.lineTo(fPts[b+6], fPts[b+7]);
+      ctx.closePath();
+      ctx.fillStyle = fill[fMat[f]];
+      ctx.fill();
+      if (edgesOn && fArea[f] > edgeMinArea) { ctx.strokeStyle = edge[fMat[f]]; ctx.stroke(); }
+    }
+  }
+
+  function draw() {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = "#0A0E0D";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(0.6, dpr() * 0.5);
+    edgesOn = opt.edge && faceCount < 3000;
+
+    for (let n = 0; n < faceCount; n += 1) order[n] = n;
+    const byDepth = (a, b) => fDepth[b] - fDepth[a];
+    const ground = order.subarray(0, groundCount);
+    const solids = order.subarray(groundCount, faceCount);
+    ground.sort(byDepth);
+    solids.sort(byDepth);
+
+    paint(ground);
+    paintOverlay();
+    paint(solids);
+  }
+
+  /* ================================================================
+     UI
+     ================================================================ */
+  const el = id => document.getElementById(id);
+  const panel = el("panel");
+  const note = el("note");
+
+  const sA = el("sA"), sB = el("sB"), sP = el("sP"), sAmp = el("sAmp"),
+        sB2 = el("sB2"), sX = el("sX"), sDp = el("sDp");
+
+  function sync() {
+    el("vA").textContent = shaft.a.toFixed(2);
+    el("vB").textContent = shaft.b.toFixed(2);
+    el("vP").textContent = Math.round(spec.dphi * 180 / Math.PI) + "°";
+    el("vAmp").textContent = spec.a.toFixed(1) + " mm";
+    el("vB2").textContent = spec.b.toFixed(1) + " mm";
+    el("vDp").textContent = spec.dp.toFixed(2) + " mm";
+    el("vX").textContent = "×" + opt.exag.toFixed(1);
+
+    const dphiDeg = spec.dphi * 180 / Math.PI;
+    const lam = (360 / dphiDeg) * spec.pitch * (spec.kdiag ? Math.SQRT1_2 : 1);
+    /* 位相を配れる段数。斜めなら i+j で 2n-1 段、軸平行なら i だけで n 段 */
+    const steps = spec.kdiag ? 2 * spec.n - 1 : spec.n;
+    const span = steps * dphiDeg;
+
+    const msgs = ["波長 λ ≈ " + lam.toFixed(0) + " mm"];
+    if (span < 360) {
+      msgs.push("⚠ 配列が1波長を張れていません（位相が " + span.toFixed(0) +
+                "° 分しかない）。山にいる接触子が存在しない瞬間があり、" +
+                "逆向きに押す接触子が支配して失速・逆走します。Δφ を " +
+                Math.ceil(360 / steps) + "° 以上にしてください。");
+    }
+    if (!spec.kdiag) {
+      msgs.push("k を軸に平行にすると同位相の接触子が1列に並んで線接触になり、機体が首を振ります。" +
+                "位相を配れる段数も " + steps + " 段しかなく、斜めの " + (2 * spec.n - 1) + " 段より不利です。");
+    }
+    if (spec.b > 3) {
+      msgs.push("上下振幅 b を下げると跳ねが減ります。推力は a·q̇ で決まるので b とは独立です。");
+    }
+    note.textContent = msgs.join(" / ");
+    note.hidden = msgs.length === 0;
+
+    for (const [id, on] of [["pStraight", shaft.a === shaft.b && shaft.a > 0],
+                            ["pSteer", shaft.a !== shaft.b && shaft.a + shaft.b !== 0],
+                            ["pTurn", Math.abs(shaft.a + shaft.b) < 1e-9 && shaft.a !== 0]]) {
+      el(id).setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  }
+
+  function readouts() {
+    el("rA").textContent = rpmOf("a").toFixed(0);
+    el("rB").textContent = rpmOf("b").toFixed(0);
+    el("rQ").textContent = (live.qd * 30 / Math.PI).toFixed(0);
+
+    const deg = v => { let d = v * 180 / Math.PI % 360; if (d > 180) d -= 360; if (d < -180) d += 360; return d; };
+    el("rPsi").textContent = deg(live.psi).toFixed(0) + "°";
+
+    const v = Math.hypot(vel.x, vel.z);
+    el("rV").textContent = v.toFixed(0) + " mm/s";
+
+    const tip = spec.a * Math.abs(live.qd);
+    el("rSlip").textContent = tip > 1 ? (live.slip / tip * 100).toFixed(0) + " %" : "—";
+
+    if (v > 4) {
+      let e = Math.atan2(vel.z, vel.x) - live.psi;
+      while (e > Math.PI) e -= 2 * Math.PI;
+      while (e < -Math.PI) e += 2 * Math.PI;
+      el("rErr").textContent = (e * 180 / Math.PI).toFixed(1) + "°";
+    } else {
+      el("rErr").textContent = "—";
+    }
+    el("rTilt").textContent =
+      (Math.hypot(car.tx, car.tz) * 180 / Math.PI).toFixed(2) + "° / 接地 " + live.contact;
+    el("rDist").textContent = (live.dist / 1000).toFixed(1) + " m";
+  }
+
+  function resetRun() {
+    car.x = 0; car.z = 0; car.tx = 0; car.tz = 0;
+    car.y = spec.b + 0.4;
+    vel.x = 0; vel.z = 0; vel.y = 0; vel.wx = 0; vel.wz = 0;
+    phiA = 0; phiB = 0;
+    live.dist = 0;
+    for (const p of pads) p.prev = 0;
+    trail.length = 0;
+  }
+
+  function setShafts(a, b) {
+    shaft.a = a; shaft.b = b;
+    sA.value = String(a); sB.value = String(b);
+    sync();
+  }
+
+  sA.addEventListener("input", () => { shaft.a = Number(sA.value); sync(); });
+  sB.addEventListener("input", () => { shaft.b = Number(sB.value); sync(); });
+  sP.addEventListener("input", () => { spec.dphi = Number(sP.value) * Math.PI / 180; buildPads(); sync(); });
+  sAmp.addEventListener("input", () => { spec.a = Number(sAmp.value); sync(); });
+  sB2.addEventListener("input", () => { spec.b = Number(sB2.value); sync(); });
+  sX.addEventListener("input", () => { opt.exag = Number(sX.value); sync(); });
+  sDp.addEventListener("input", () => { spec.dp = Number(sDp.value); tune(); sync(); });
+
+  el("pStraight").addEventListener("click", () => setShafts(2, 2));
+  el("pSteer").addEventListener("click", () => setShafts(2.5, 1.5));
+  el("pTurn").addEventListener("click", () => setShafts(2, -2));
+
+  const bKd = el("bKd"), bKx = el("bKx");
+  function setK(diag) {
+    spec.kdiag = diag;
+    bKd.setAttribute("aria-pressed", diag ? "true" : "false");
+    bKx.setAttribute("aria-pressed", diag ? "false" : "true");
+    buildPads(); sync();
+  }
+  bKd.addEventListener("click", () => setK(true));
+  bKx.addEventListener("click", () => setK(false));
+
+  el("cMech").addEventListener("change", e => { opt.mech = e.target.checked; });
+  el("cEdge").addEventListener("change", e => { opt.edge = e.target.checked; });
+
+  el("bReset").addEventListener("click", resetRun);
+  el("bView").addEventListener("click", () => { view.yaw = 0.72; view.pitch = 0.5; userZoomed = false; fitView(); });
+  const bPause = el("bPause");
+  bPause.addEventListener("click", () => {
+    opt.paused = !opt.paused;
+    bPause.textContent = opt.paused ? "再生" : "一時停止";
+  });
+
+  const bSheet = el("bSheet");
+  function setSheet(open) {
+    panel.classList.toggle("collapsed", !open);
+    bSheet.textContent = open ? "操作パネルを閉じる" : "操作パネルを開く";
+  }
+  bSheet.addEventListener("click", () => setSheet(panel.classList.contains("collapsed")));
+  setSheet(window.innerWidth > 780);
+
+  /* ---- カメラ操作 ---- */
+  const pointers = new Map();
+  let pinch = 0, userZoomed = false;
+
+  const spread = () => {
+    const p = [...pointers.values()];
+    return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+  };
+
+  canvas.addEventListener("pointerdown", e => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    canvas.classList.add("dragging");
+    if (pointers.size === 2) pinch = spread();
+  });
+
+  canvas.addEventListener("pointermove", e => {
+    const prev = pointers.get(e.pointerId);
+    if (!prev) return;
+    if (pointers.size === 1) {
+      view.yaw -= (e.clientX - prev.x) * 0.008;
+      view.pitch = clamp(view.pitch + (e.clientY - prev.y) * 0.006, 0.06, 1.45);
+    }
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) {
+      const now = spread();
+      if (pinch > 0) { userZoomed = true; view.dist = clamp(view.dist * pinch / now, spec.size * 0.6, spec.size * 8); }
+      pinch = now;
+    }
+  });
+
+  const release = e => {
+    pointers.delete(e.pointerId);
+    pinch = 0;
+    if (pointers.size === 0) canvas.classList.remove("dragging");
+  };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+
+  canvas.addEventListener("wheel", e => {
+    e.preventDefault();
+    userZoomed = true;
+    view.dist = clamp(view.dist * (1 + Math.sign(e.deltaY) * 0.1), spec.size * 0.6, spec.size * 8);
+  }, { passive: false });
+
+  /* ---- サイズ ---- */
+  const dpr = () => Math.min(window.devicePixelRatio || 1, 2);
+  const aspect = () => (canvas.width / canvas.height) || 1;
+  const fov = () => { const a = aspect(); return a >= 1 ? 0.42 : clamp(0.42 + (1 - a) * 0.24, 0.42, 0.62); };
+
+  function fitView() {
+    const t = Math.tan(fov());
+    view.dist = 1.6 * Math.max(spec.half / (aspect() * t), spec.half / t);
+    userZoomed = false;
+  }
+
+  function resize() {
+    const r = dpr();
+    canvas.width = Math.floor(canvas.clientWidth * r);
+    canvas.height = Math.floor(canvas.clientHeight * r);
+    cx = canvas.width / 2;
+    cy = canvas.height / 2;
+    focal = canvas.height / (2 * Math.tan(fov()));
+    minArea = dpr() * dpr() * 1.6;
+    edgeMinArea = dpr() * dpr() * 26;
+    spanX = canvas.width * 1.4;
+    spanY = canvas.height * 1.4;
+    if (!userZoomed) fitView();
+  }
+
+  window.addEventListener("resize", resize);
+
+  /* ---- ループ ---- */
+  let last = 0, accum = 0;
+
+  function frame(now) {
+    const dt = last ? Math.min(0.05, (now - last) / 1000) : 0;
+    last = now;
+    if (!opt.paused) step(dt);
+    camera();
+    build();
+    draw();
+    accum += dt;
+    if (accum > 0.1) { readouts(); accum = 0; }
+    requestAnimationFrame(frame);
+  }
+
+  buildPads();
+  resetRun();
+  sync();
+  resize();
+  requestAnimationFrame(frame);
+})();
+</script>
