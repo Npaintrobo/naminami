@@ -348,8 +348,8 @@
      静的な沈み込みが常に spec.dp になるように整定する。 */
   let KC = 47, CC = 0.15;       // 接地ばね [N/mm]、減衰 [N.s/mm]
 
-  /* ある剛性 K のときの静的釣合い高さ */
-  function equilibrium(ys, K) {
+  /* 高さだけの釣合い（3自由度解の初期値） */
+  function heaveOnly(ys, K) {
     const W = MASS * GRAV / ACC;
     let lo = -spec.b - 30, hi = spec.b + 1;
     for (let i = 0; i < 50; i += 1) {
@@ -359,6 +359,56 @@
       if (f > W) lo = mid; else hi = mid;
     }
     return (lo + hi) / 2;
+  }
+
+  /* 静的平衡を 高さ・ピッチ・ロール で連立して解く。弾性＋重力のポテンシャル
+       E = Σ (K/2)·max(0,u)² + Mg·Y,   u_i = −(Y − tx·z + tz·x + y_i)
+     は凸なので、減衰Newton＋直線探索で必ず収束する。高さだけ解いて姿勢を 0 に
+     固定すると、「傾けば釣り合う」配置を支持不能と誤判定する。 */
+  function equilibrium(ys, K) {
+    const W = MASS * GRAV / ACC;
+    let Y = heaveOnly(ys, K), tx = 0, tz = 0;
+    const px = pads.map(p => p.x), pz = pads.map(p => p.z);
+
+    const energy = (Y_, tx_, tz_) => {
+      let e = W * Y_;
+      for (let i = 0; i < ys.length; i += 1) {
+        const u = -(Y_ - tx_ * pz[i] + tz_ * px[i] + ys[i]);
+        if (u > 0) e += 0.5 * K * u * u;
+      }
+      return e;
+    };
+
+    for (let it = 0; it < 80; it += 1) {
+      let g1 = W, g2 = 0, g3 = 0, h11 = 0, h12 = 0, h13 = 0, h22 = 0, h23 = 0, h33 = 0;
+      for (let i = 0; i < ys.length; i += 1) {
+        const u = -(Y - tx * pz[i] + tz * px[i] + ys[i]);
+        if (u <= 0) continue;
+        const f = K * u, x = px[i], z = pz[i];
+        g1 -= f; g2 += f * z; g3 -= f * x;
+        h11 += K; h12 += -K * z; h13 += K * x;
+        h22 += K * z * z; h23 += -K * x * z; h33 += K * x * x;
+      }
+      if (Math.hypot(g1, g2, g3) < W * 1e-9) break;
+      const lam = Math.max(1e-6, 1e-6 * (h11 + h22 + h33));
+      const a11 = h11 + lam, a22 = h22 + lam, a33 = h33 + lam;
+      const det = a11 * (a22 * a33 - h23 * h23) - h12 * (h12 * a33 - h23 * h13) + h13 * (h12 * h23 - a22 * h13);
+      if (!isFinite(det) || Math.abs(det) < 1e-30) { Y -= 0.1; continue; }
+      const b1 = -g1, b2 = -g2, b3 = -g3;
+      const dY  = (b1 * (a22 * a33 - h23 * h23) - h12 * (b2 * a33 - h23 * b3) + h13 * (b2 * h23 - a22 * b3)) / det;
+      const dtx = (a11 * (b2 * a33 - h23 * b3) - b1 * (h12 * a33 - h23 * h13) + h13 * (h12 * b3 - b2 * h13)) / det;
+      const dtz = (a11 * (a22 * b3 - h23 * b2) - h12 * (h12 * b3 - h13 * b2) + b1 * (h12 * h23 - a22 * h13)) / det;
+      if (!isFinite(dY)) break;
+      const e0 = energy(Y, tx, tz);
+      let step = 1, moved = false;
+      for (let k = 0; k < 40; k += 1) {
+        if (energy(Y + step * dY, tx + step * dtx, tz + step * dtz) < e0) { moved = true; break; }
+        step *= 0.5;
+      }
+      if (!moved) break;
+      Y += step * dY; tx += step * dtx; tz += step * dtz;
+    }
+    return { Y, tx, tz };
   }
 
   /* 「δp」は静的に置いたときの最大貫入と定義する。位相で振れるので1周期平均を取り、
@@ -375,9 +425,11 @@
     const meanMax = K => {
       let a = 0;
       for (const ys of sets) {
-        const Y = equilibrium(ys, K);
+        const e = equilibrium(ys, K);
         let mx = 0;
-        for (const y of ys) mx = Math.max(mx, -(Y + y));
+        for (let i = 0; i < ys.length; i += 1) {
+          mx = Math.max(mx, -(e.Y - e.tx * pads[i].z + e.tz * pads[i].x + ys[i]));
+        }
         a += mx;
       }
       return a / S;
@@ -391,17 +443,21 @@
     live.pen = meanMax(KC);
     live.window = Math.acos(clamp(1 - live.pen / spec.b, -1, 1)) * 180 / Math.PI;
 
-    let nc = 0, worst = Infinity, worstPts = 1e9;
+    let nc = 0, worst = Infinity, worstPts = 1e9, maxTilt = 0;
     for (const ys of sets) {
-      const Y = equilibrium(ys, KC);
+      const e = equilibrium(ys, KC);
+      maxTilt = Math.max(maxTilt, Math.hypot(e.tx, e.tz));
       const pts = [];
-      for (let i = 0; i < pads.length; i += 1) if (-(Y + ys[i]) > 0) { nc += 1; pts.push([pads[i].x, pads[i].z]); }
+      for (let i = 0; i < pads.length; i += 1) {
+        if (-(e.Y - e.tx * pads[i].z + e.tz * pads[i].x + ys[i]) > 0) { nc += 1; pts.push([pads[i].x, pads[i].z]); }
+      }
       worstPts = Math.min(worstPts, pts.length);
       worst = Math.min(worst, hullMargin(pts));
     }
     live.nc = Math.max(1, nc / S);
     live.margin = worst;
     live.minPts = worstPts;
+    live.staticTilt = maxTilt * 180 / Math.PI;
     CC = 2 * 0.35 * Math.sqrt(live.nc * KC * 1000 * MASS) / 1000 / live.nc;
   }
 
@@ -440,7 +496,7 @@
   const view = { yaw: 0.72, pitch: 0.5, dist: 1400 };
   const opt = { mech: true, edge: true, paused: false, exag: 1, hold: false, target: 0 };
   const live = { q: 0, qd: 0, psi: 0, psid: 0, slip: 0, dist: 0, contact: 0, load: 1,
-                 nc: 0, window: 0, gap: 0, pen: 0, margin: 0, minPts: 0 };
+                 nc: 0, window: 0, gap: 0, pen: 0, margin: 0, minPts: 0, staticTilt: 0 };
 
   /* 固定刻みで回したときの周期平均を採る計測器 */
   const meter = { on: false, t: 0, dx: 0, dz: 0, slip: 0, load: 0, load2: 0, tilt2: 0, cnt: 0, minC: 1e9 };
@@ -1015,14 +1071,16 @@
     const msgs = ["波長 λ ≈ " + lam.toFixed(0) + " mm",
                   "実測貫入 " + live.pen.toFixed(3) + " mm / 接地窓 ±" + live.window.toFixed(1) +
                   "° / 最大位相ギャップ " + live.gap.toFixed(0) + "° / 平均接地 " + live.nc.toFixed(1) + " 本",
-                  "静的支持余裕 " + (live.margin === -Infinity ? "支持不能" : live.margin.toFixed(0) + " mm") +
-                  "（最小接地点数 " + live.minPts + " 点）"];
+                  "静的平衡の傾き " + live.staticTilt.toFixed(3) + "° / 最小接地 " + live.minPts +
+                  " 点 / 水平時の凸包余裕 " +
+                  (live.margin === -Infinity ? "含まず" : live.margin.toFixed(0) + " mm")];
 
     /* 接触があることと姿勢を保持できることは別。接地点の凸包が重心の投影を含まないと、
        接触していてもピッチ・ロールを支持できない。 */
-    if (live.margin <= 0) {
-      msgs.push("⚠ 支持不能。接地点の凸包が重心の投影を含まない位相があります（最小 " +
-                live.minPts + " 点）。接触があっても姿勢を保持できません。");
+    /* 凸包が重心を含まなくても、傾けば釣り合う。支持できないのではなく傾く。 */
+    if (live.staticTilt > 0.5) {
+      msgs.push("⚠ 静的に釣り合わせるだけで " + live.staticTilt.toFixed(2) +
+                "° 傾きます（最小接地 " + live.minPts + " 点）。走行中はさらに振れます。");
     }
 
     /* 位相ギャップは「車高が一定なら接触が切れる」という話でしかない。実際には機体が
@@ -1076,24 +1134,25 @@
   /* 自由落下から始めると、3秒経っても法線力が重量の 0.6 倍しかない過渡のまま。
      いまの位相での静的釣合い高さを二分法で解いて、そこから始める。 */
   function settle() {
-    /* いま走っている位相で釣り合わせる。Δφ や k を走行中に変えたときにも使う。 */
+    /* いま走っている位相で、高さ・ピッチ・ロールを連立して釣り合わせる。 */
     for (const p of pads) { p.th = p.ph - live.q; p.y = -spec.b * Math.cos(p.th); }
     const W = MASS * GRAV / ACC;
     const load = Y => { let f = 0; for (const p of pads) f += Math.max(0, -(Y + p.y)) * KC; return f; };
-    let lo = -spec.b - 20, hi = spec.b + 1;
-    for (let i = 0; i < 60; i += 1) {
-      const mid = (lo + hi) / 2;
-      if (load(mid) > W) lo = mid; else hi = mid;
-    }
-    car.y = (lo + hi) / 2;
-    for (const p of pads) p.prev = Math.max(0, -(car.y + p.y));
+    void load;
+    const e = equilibrium(pads.map(p => p.y), KC);
+    car.y = e.Y; car.tx = e.tx; car.tz = e.tz;
+    for (const p of pads) p.prev = Math.max(0, -(car.y - car.tx * p.z + car.tz * p.x + p.y));
   }
 
   function resetRun() {
     car.x = 0; car.z = 0; car.tx = 0; car.tz = 0;
     vel.x = 0; vel.z = 0; vel.y = 0; vel.wx = 0; vel.wz = 0;
     phiA = 0; phiB = 0;
-    live.dist = 0;
+    /* 搬送位相・偏極角も消す。残っていると settle が古い位相で釣り合わせるので、
+       実行履歴によって初期荷重が変わっていた。 */
+    live.q = 0; live.qd = 0; live.psi = 0; live.psid = 0;
+    live.dist = 0; live.slip = 0;
+    drive.a = shaft.a; drive.b = shaft.b;
     settle();
     trail.length = 0;
   }

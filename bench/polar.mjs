@@ -58,7 +58,8 @@ function lattice(dphiDeg, { shuffle = false, seed = 7, kdir = 'diag' } = {}) {
    「δp」は静的に置いたときの最大貫入と定義する。位相によって振れるので1周期で平均し、
    その平均が δp になる K を二分法で解く。以前は総貫入量から一発で決めていて、
    実際に釣り合わせた貫入（0.12mm）と設定値（0.3mm）が合っていなかった。 */
-function equilibrium(ys, K, weight) {
+/* 高さだけの釣合い。3自由度解の初期値に使う。 */
+function heaveOnly(ys, K, weight) {
   let lo = -Math.max(...ys.map(Math.abs)) - 30, hi = -Math.min(...ys) + 1;
   for (let i = 0; i < 60; i += 1) {
     const mid = (lo + hi) / 2;
@@ -69,40 +70,119 @@ function equilibrium(ys, K, weight) {
   return (lo + hi) / 2;
 }
 
+/* 静的平衡を 高さ Y・ピッチ tx・ロール tz で連立して解く。
+
+   貫入 u_i = −(Y − tx·z_i + tz·x_i + y_i)、法線力 N_i = K·max(0,u_i) のとき、
+   釣合い ΣN = Mg, ΣN·z = 0, ΣN·x = 0 は、弾性＋重力のポテンシャル
+
+     E(Y,tx,tz) = Σ (K/2)·max(0,u_i)² + Mg·Y
+
+   の停留点そのものです。E は u が引数のアフィン関数なので**凸**で、
+   減衰Newton＋直線探索なら必ず収束します（接地が1〜2点しかない配置でも、
+   より多くの足が当たるまで傾いていく）。
+
+   以前は高さだけを解いて姿勢を 0 に固定していたので、「傾けば釣り合う」配置まで
+   支持不能と誤判定していました。素の Newton は接地が少ない条件で発散しました。 */
+function equilibrium(ys, K, weight, xs, zs) {
+  if (!xs) return { Y: heaveOnly(ys, K, weight), tx: 0, tz: 0, n: 0, ok: true };
+  const N = ys.length;
+  let Y = heaveOnly(ys, K, weight), tx = 0, tz = 0;
+
+  const energy = (Y_, tx_, tz_) => {
+    let e = weight * Y_;
+    for (let i = 0; i < N; i += 1) {
+      const u = -(Y_ - tx_ * zs[i] + tz_ * xs[i] + ys[i]);
+      if (u > 0) e += 0.5 * K * u * u;
+    }
+    return e;
+  };
+
+  for (let it = 0; it < 200; it += 1) {
+    let g1 = weight, g2 = 0, g3 = 0;
+    let h11 = 0, h12 = 0, h13 = 0, h22 = 0, h23 = 0, h33 = 0, cnt = 0;
+    for (let i = 0; i < N; i += 1) {
+      const u = -(Y - tx * zs[i] + tz * xs[i] + ys[i]);
+      if (u <= 0) continue;
+      cnt += 1;
+      const f = K * u, x = xs[i], z = zs[i];
+      g1 -= f; g2 += f * z; g3 -= f * x;
+      h11 += K;        h12 += -K * z;     h13 += K * x;
+      h22 += K * z * z; h23 += -K * x * z; h33 += K * x * x;
+    }
+    const gn = Math.hypot(g1, g2, g3);
+    if (gn < weight * 1e-9) break;
+
+    /* 接地が少ないとヘッセ行列が特異になるので正則化する */
+    const lam = Math.max(1e-6, 1e-6 * (h11 + h22 + h33));
+    const a11 = h11 + lam, a22 = h22 + lam, a33 = h33 + lam;
+    const det = a11 * (a22 * a33 - h23 * h23) - h12 * (h12 * a33 - h23 * h13) + h13 * (h12 * h23 - a22 * h13);
+    if (!isFinite(det) || Math.abs(det) < 1e-30) { Y -= 0.1; continue; }
+    const b1 = -g1, b2 = -g2, b3 = -g3;
+    const dY  = (b1 * (a22 * a33 - h23 * h23) - h12 * (b2 * a33 - h23 * b3) + h13 * (b2 * h23 - a22 * b3)) / det;
+    const dtx = (a11 * (b2 * a33 - h23 * b3) - b1 * (h12 * a33 - h23 * h13) + h13 * (h12 * b3 - b2 * h13)) / det;
+    const dtz = (a11 * (a22 * b3 - h23 * b2) - h12 * (h12 * b3 - h13 * b2) + b1 * (h12 * h23 - a22 * h13)) / det;
+    if (!isFinite(dY) || !isFinite(dtx) || !isFinite(dtz)) break;
+
+    /* 直線探索。凸なので必ず下がる歩幅がある */
+    const e0 = energy(Y, tx, tz);
+    let step = 1;
+    let moved = false;
+    for (let k = 0; k < 40; k += 1) {
+      if (energy(Y + step * dY, tx + step * dtx, tz + step * dtz) < e0) { moved = true; break; }
+      step *= 0.5;
+    }
+    if (!moved) break;
+    Y += step * dY; tx += step * dtx; tz += step * dtz;
+    void cnt;
+    if (Math.abs(step * dY) < 1e-10 && Math.abs(step * dtx) < 1e-13 && Math.abs(step * dtz) < 1e-13) break;
+  }
+
+  let cnt = 0, R = -weight;
+  for (let i = 0; i < N; i += 1) {
+    const u = -(Y - tx * zs[i] + tz * xs[i] + ys[i]);
+    if (u > 0) { cnt += 1; R += K * u; }
+  }
+  return { Y, tx, tz, n: cnt, ok: isFinite(Y) && Math.abs(R) < weight * 1e-3 };
+}
+
+/* 標本数は位相格子と互いに素な素数にする。24点だと Δφ=60°（6階級）と噛み合って
+   相対位相が {0,15,30,45}° しか出ず、K が 11.5% ずれていた。 */
+const TSAMP = 97;
+
+/* 「δp」は静的平衡での最大貫入と定義し、その1周期平均が δp になる K を二分法で解く。 */
 function tune(pads, b = BREF.v, dp = DP.v, mass = MASS) {
   const weight = mass * G / ACC;
-  const S = 24;
+  const xs = pads.map(p => p.x), zs = pads.map(p => p.z);
   const phases = [];
-  for (let s = 0; s < S; s += 1) {
-    const q = s / S * TAU;
+  for (let s = 0; s < TSAMP; s += 1) {
+    const q = s / TSAMP * TAU;
     phases.push(pads.map(p => -b * Math.cos(p.ph - q)));
   }
-  const meanMax = K => {
-    let acc = 0;
+  const at = K => {
+    let pen = 0, ncs = 0, tilt = 0, bad = 0;
     for (const ys of phases) {
-      const Y = equilibrium(ys, K, weight);
+      const e = equilibrium(ys, K, weight, xs, zs);
+      if (!e.ok) bad += 1;
       let mx = 0;
-      for (const y of ys) mx = Math.max(mx, -(Y + y));
-      acc += mx;
+      for (let i = 0; i < ys.length; i += 1) {
+        const d = -(e.Y - e.tx * zs[i] + e.tz * xs[i] + ys[i]);
+        if (d > 0) { ncs += 1; if (d > mx) mx = d; }
+      }
+      pen += mx;
+      tilt = Math.max(tilt, Math.hypot(e.tx, e.tz));
     }
-    return acc / S;
+    return { pen: pen / TSAMP, nc: Math.max(1, ncs / TSAMP), tilt: tilt * 180 / Math.PI, bad };
   };
   let klo = 0.05, khi = 20000;
   for (let i = 0; i < 50; i += 1) {
     const km = (klo + khi) / 2;
-    if (meanMax(km) > dp) klo = km; else khi = km;      // K が大きいほど貫入は小さい
+    if (at(km).pen > dp) klo = km; else khi = km;       // K が大きいほど貫入は小さい
   }
   const K = (klo + khi) / 2;
-  const actual = meanMax(K);
-
-  let ncSum = 0;
-  for (const ys of phases) {
-    const Y = equilibrium(ys, K, weight);
-    for (const y of ys) if (-(Y + y) > 0) ncSum += 1;
-  }
-  const nc = Math.max(1, ncSum / S);
-  const C = 2 * 0.35 * Math.sqrt(nc * K * 1000 * mass) / 1000 / nc;
-  return { K, C, nc, pen: actual, window: Math.acos(clamp(1 - actual / b, -1, 1)) * 180 / Math.PI };
+  const r = at(K);
+  const C = 2 * 0.35 * Math.sqrt(r.nc * K * 1000 * mass) / 1000 / r.nc;
+  return { K, C, nc: r.nc, pen: r.pen, tilt: r.tilt, bad: r.bad,
+           window: Math.acos(clamp(1 - r.pen / b, -1, 1)) * 180 / Math.PI };
 }
 
 /* ── 支持の判定 ───────────────────────────────
@@ -122,16 +202,26 @@ function hull(pts) {
   return h.length >= 3 ? h : null;
 }
 
-function supportMargin(pads, b, K, dp) {
+/* 各搬送位相で 高さ・ピッチ・ロール を連立して静的平衡を解き、
+   ・解が存在するか
+   ・そのとき機体はどれだけ傾く必要があるか
+   ・接地点の凸包が重心投影を含むか（水平姿勢を保てるか）
+   を分けて返す。以前は水平姿勢に固定した接触集合で凸包だけを見ていたので、
+   「傾けば釣り合う」配置を支持不能と誤判定していた（偽陰性）。 */
+function supportMargin(pads, b, K) {
   const weight = MASS * G / ACC;
-  const S = 72;
-  let worstMargin = Infinity, worstCnt = 1e9;
-  for (let s = 0; s < S; s += 1) {
-    const q = s / S * TAU;
+  const xs = pads.map(p => p.x), zs = pads.map(p => p.z);
+  let worstMargin = Infinity, worstCnt = 1e9, maxTilt = 0, bad = 0;
+  for (let s = 0; s < TSAMP; s += 1) {
+    const q = s / TSAMP * TAU;
     const ys = pads.map(p => -b * Math.cos(p.ph - q));
-    const Y = equilibrium(ys, K, weight);
+    const e = equilibrium(ys, K, weight, xs, zs);
+    if (!e.ok) bad += 1;
+    maxTilt = Math.max(maxTilt, Math.hypot(e.tx, e.tz) * 180 / Math.PI);
     const pts = [];
-    for (let i = 0; i < pads.length; i += 1) if (-(Y + ys[i]) > 0) pts.push([pads[i].x, pads[i].z]);
+    for (let i = 0; i < pads.length; i += 1) {
+      if (-(e.Y - e.tx * zs[i] + e.tz * xs[i] + ys[i]) > 0) pts.push([xs[i], zs[i]]);
+    }
     worstCnt = Math.min(worstCnt, pts.length);
     const h = hull(pts);
     if (!h) { worstMargin = -Infinity; continue; }
@@ -143,8 +233,7 @@ function supportMargin(pads, b, K, dp) {
     }
     worstMargin = Math.min(worstMargin, m);
   }
-  void dp;
-  return { margin: worstMargin, minPts: worstCnt };
+  return { margin: worstMargin, minPts: worstCnt, maxTilt, noSolution: bad };
 }
 
 function phaseGap(pads) {
@@ -164,14 +253,22 @@ function core(pads, drv, { b = BREF.v, K, C } = {}) {
   const weight = MASS * G / ACC;
 
   drv.reset();
-  /* 静的釣合いは運動学ごとに高さの式が違うので、drv.foot から取る（偏極式を決め打ちしない） */
+  /* 静的釣合いは運動学ごとに高さの式が違うので drv.foot から取り、
+     高さ・ピッチ・ロールを連立して解いた姿勢から始める。 */
   const ys = pads.map(p => drv.foot(p)[0]);
-  let Y = equilibrium(ys, K, weight);
-  for (let i = 0; i < pads.length; i += 1) pads[i].prev = Math.max(0, -(Y + ys[i]));
+  const xs = pads.map(p => p.x), zs = pads.map(p => p.z);
+  const eq = equilibrium(ys, K, weight, xs, zs);
+  let Y = eq.Y, tx = eq.tx, tz = eq.tz;
+  for (let i = 0; i < pads.length; i += 1) {
+    pads[i].prev = Math.max(0, -(Y - tx * zs[i] + tz * xs[i] + ys[i]));
+  }
 
-  let X = 0, Z = 0, yaw = 0, tx = 0, tz = 0;
+  let X = 0, Z = 0, yaw = 0;
   let vX = 0, vZ = 0, vY = 0, vp = 0, wx = 0, wz = 0;
-  let dx = 0, dz = 0, slip = 0, wt = 0, nmean = 0, nvar = 0, minC = 1e9, cntSum = 0, tilt2 = 0;
+  /* 滑り率は「散逸 / 法線力積」で定義する。時間ステップごとに wsum で割って
+     時間平均すると、荷重が 0 に近い瞬間も同じ重みで入って過小評価になる。 */
+  let dx = 0, dz = 0, path = 0, slipNum = 0, slipDen = 0;
+  let wt = 0, nmean = 0, nvar = 0, minC = 1e9, cntSum = 0, tilt2 = 0;
   const T = WARM + SPAN;
 
   for (let s = 0; s < T / DT; s += 1) {
@@ -211,7 +308,8 @@ function core(pads, drv, { b = BREF.v, K, C } = {}) {
 
     if (live) {
       dx += vX * DT; dz += vZ * DT; wt += DT;
-      slip += (wsum > 0 ? sl / wsum : 0) * DT;
+      path += Math.hypot(vX, vZ) * DT;
+      slipNum += sl * DT; slipDen += wsum * DT;
       const ld = SN / weight;
       nmean += ld * DT; nvar += ld * ld * DT;
       cntSum += cnt * DT; tilt2 += (tx * tx + tz * tz) * DT;
@@ -221,8 +319,10 @@ function core(pads, drv, { b = BREF.v, K, C } = {}) {
 
   const mn = nmean / wt;
   return {
-    speed: Math.hypot(dx, dz) / wt, dir: Math.atan2(dz, dx) * 180 / Math.PI,
-    slip: slip / wt / TIP, load: mn,
+    /* speed は始終点間の弦長÷時間。旋回すると経路長より短く出るので pathSpeed も返す。 */
+    speed: Math.hypot(dx, dz) / wt, pathSpeed: path / wt,
+    dir: Math.atan2(dz, dx) * 180 / Math.PI,
+    slip: slipDen > 0 ? slipNum / slipDen / TIP : 0, load: mn,
     ripple: Math.sqrt(Math.max(0, nvar / wt - mn * mn)) / Math.max(mn, 1e-9),
     contact: cntSum / wt, minC, tilt: Math.sqrt(tilt2 / wt) * 180 / Math.PI,
     psi: drv.psi * 180 / Math.PI
@@ -262,19 +362,23 @@ function polarDrive({ shaftA = 1, shaftB = 1, hold = false, target = 0, sweep = 
 }
 
 function shareDrive(cmd, retract = true) {
-  let t0 = 0;
+  /* 位相は積分して作る。rate×t で作ると、ランプ中は実際の微分が 2倍になり
+     接触位置と接触速度が食い違う。 */
+  let px = 0, pz = 0, wx = 0, wz = 0;
   const d = {
-    reset() { t0 = 0; d.psi = cmd; },
-    step(t) { t0 = t; },
+    reset() { px = 0; pz = 0; wx = 0; wz = 0; d.psi = cmd; },
+    step(t, dt) {
+      const g = rampOf(t);
+      wx = W * g * Math.cos(cmd); wz = W * g * Math.sin(cmd);
+      px += wx * dt; pz += wz * dt;
+    },
     foot(p) {
-      const g = rampOf(t0);
-      const wx = W * g * Math.cos(cmd), wz = W * g * Math.sin(cmd);
       /* 指令が 0 の軸だけを退避させる。以前は速度どうしを比較していて、
          起動時（両方 0）に両ラティスが持ち上がり発散していた。 */
       const liftX = retract && Math.abs(Math.cos(cmd)) < 1e-9 ? 2 * BREF.v : 0;
       const liftZ = retract && Math.abs(Math.sin(cmd)) < 1e-9 ? 2 * BREF.v : 0;
-      if (p.xy === 0) { const th = p.ph - wx * t0; return [-BREF.v * Math.cos(th) + liftX, 0, 0, -AMP * wx * Math.cos(th), 0]; }
-      const th = p.ph - wz * t0; return [-BREF.v * Math.cos(th) + liftZ, 0, 0, 0, -AMP * wz * Math.cos(th)];
+      if (p.xy === 0) { const th = p.ph - px; return [-BREF.v * Math.cos(th) + liftX, 0, 0, -AMP * wx * Math.cos(th), 0]; }
+      const th = p.ph - pz; return [-BREF.v * Math.cos(th) + liftZ, 0, 0, 0, -AMP * wz * Math.cos(th)];
     },
     psi: cmd
   };
@@ -290,15 +394,20 @@ export { lattice, tune, core, polarDrive, shareDrive, supportMargin, phaseGap, B
    引いていたので、境界ごとに位相が跳んで（Δφ=15° では 180°）不連続面ができ、
    荷は開始時からそれを跨いでいた。荷も静的釣合いから始めて回転数をランプする。
    ================================================================ */
-function tableRun(dphiDeg, { kdir = 'diag', shuffle = false, psi = Math.PI / 4,
-                             b = 1.5, S = 150, M = 0.5, HCG2 = 15, dp = 0.4 } = {}) {
+function tableRun(dphiDeg, { kdir = 'diag', shuffle = false, psi = Math.PI / 4, q0 = 0,
+                             b = 1.5, S = 150, M = 0.5, HCG2 = 15, dp = 0.4, Kfix = null } = {}) {
   const d = dphiDeg * Math.PI / 180;
+  /* シャッフルは「同じ位相集合を別の場所に配る」でなければ比較にならない。
+     階級数 M = 360/Δφ の集合 {m·Δφ} から一様に引く（以前は連続一様乱数で、
+     Δφ を変えても同じ位相場になっていた）。 */
+  const cls = Math.max(1, Math.round(360 / dphiDeg));
   const hash = (i, k) => {
     let h = (i * 73856093) ^ (k * 19349663);
-    h = (h ^ (h >>> 13)) * 1274126177;
-    return ((h >>> 0) / 4294967296) * TAU;
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h >>> 0) / 4294967296);
   };
-  const at = (i, k) => (shuffle ? hash(i, k) : (kdir === 'diag' ? i + k : i) * d);
+  const at = (i, k) => (shuffle ? Math.floor(hash(i, k) * cls) * d
+                                : (kdir === 'diag' ? i + k : i) * d) + q0;
 
   const Ih = M * (S * S / 12 + HCG2 * HCG2), Iy = M * (S * S / 6);
   const weight = M * G / ACC;
@@ -334,6 +443,7 @@ function tableRun(dphiDeg, { kdir = 'diag', shuffle = false, psi = Math.PI / 4,
       }
       return acc / SS;
     };
+    if (Kfix) return Kfix;
     let klo = 0.001, khi = 500;
     for (let n = 0; n < 50; n += 1) { const km = (klo + khi) / 2; if (meanMax(km) > dp) klo = km; else khi = km; }
     return (klo + khi) / 2;
@@ -354,8 +464,10 @@ function tableRun(dphiDeg, { kdir = 'diag', shuffle = false, psi = Math.PI / 4,
   let dx = 0, dz = 0, wt = 0, drop = 0, tilt2 = 0;
   const T = WARM + SPAN;
 
+  let qq = 0;                       // 搬送位相。rate×t ではなく積分して作る
   for (let s = 0; s < T / DT; s += 1) {
     const t = s * DT, live = t > WARM, g = rampOf(t);
+    qq += W * g * DT;
     if (Math.hypot(tx, tz) > TIPPED) return { fell: t, K };
     const cp = Math.cos(yaw), spz = Math.sin(yaw);
     let SN = 0, Fx = 0, Fz = 0, Ty = 0, Tx = 0, Tz = 0, cnt = 0;
@@ -364,7 +476,7 @@ function tableRun(dphiDeg, { kdir = 'diag', shuffle = false, psi = Math.PI / 4,
       const rx = i * P - X, rz = k * P - Z;
       const bx = rx * cp + rz * spz, bz = -rx * spz + rz * cp;
       if (Math.abs(bx) > S / 2 || Math.abs(bz) > S / 2) continue;
-      const th = at(i, k) - W * g * t;
+      const th = at(i, k) - qq;
       const pen = b + b * Math.cos(th) - (Y - tx * rz + tz * rx);
       const key = i * 1e5 + k;
       if (pen <= 0) { prev.set(key, 0); continue; }
@@ -398,9 +510,12 @@ export { tableRun };
    試験
    ================================================================ */
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const pct = v => (v * 100).toFixed(0).padStart(3) + '%';
-  const fmt = r => `${r.speed.toFixed(0).padStart(4)} mm/s (${(r.speed / TIP * 100).toFixed(0).padStart(3)}%)  ` +
-    `${r.dir.toFixed(1).padStart(7)}°  滑り${pct(r.slip)}  荷重${r.load.toFixed(2)}±${pct(r.ripple)}  ` +
+  const pct = v => (v * 100).toFixed(1).padStart(5) + '%';
+  /* 弦（始終点間）と経路長の両方を出す。旋回や蛇行があると前者は小さく出る。
+     滑りは「散逸 / 法線力積」。 */
+  const fmt = r => `弦${r.speed.toFixed(0).padStart(4)}/経路${r.pathSpeed.toFixed(0).padStart(4)} mm/s ` +
+    `(${(r.pathSpeed / TIP * 100).toFixed(0).padStart(3)}%)  ${r.dir.toFixed(1).padStart(7)}°  ` +
+    `滑り${pct(r.slip)}  荷重${r.load.toFixed(2)}±${pct(r.ripple)}  ` +
     `傾き${r.tilt.toFixed(2).padStart(5)}°  接地${r.contact.toFixed(1).padStart(4)}(最小${r.minC})`;
 
   const CFG = [
@@ -411,19 +526,25 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   console.log(`■ 条件（12×12接触子, ピッチ${P}mm, a=b=${AMP}mm, ${RPM}rpm, μ=${MU}, δp=${DP.v}mm）`);
   console.log(`  山での面内速度 a·q̇ = ${TIP.toFixed(0)} mm/s。速度の括弧内はこれに対する比。`);
   console.log(`  K は「静的釣合いの最大貫入の1周期平均 = δp」を二分法で解いた値。\n`);
-  console.log('  条件                K[N/mm]  実測貫入  接地窓   最大位相ギャップ  静的支持余裕  最小接地点数');
+  console.log('  条件               K[N/mm] 実測貫入  接地窓  位相ギャップ  静的平衡の傾き  最小接地  水平時の余裕');
   const T = {};
   for (const [lab, dphi, kdir] of CFG) {
     const pads = lattice(dphi, { kdir });
     const t = tune(pads);
-    const sm = supportMargin(pads, BREF.v, t.K, DP.v);
+    const sm = supportMargin(pads, BREF.v, t.K);
     T[lab] = { pads, t, sm, gap: phaseGap(pads) };
-    console.log(`  ${lab.padEnd(16)} ${t.K.toFixed(1).padStart(6)}  ${t.pen.toFixed(3)}mm  ±${t.window.toFixed(1)}°` +
-      `      ${T[lab].gap.toFixed(0).padStart(3)}°        ` +
-      `${(sm.margin === -Infinity ? '  支持不能' : sm.margin.toFixed(0).padStart(6) + 'mm')}      ${String(sm.minPts).padStart(3)} 点`);
+    console.log(`  ${lab.padEnd(16)} ${t.K.toFixed(1).padStart(6)} ${t.pen.toFixed(3)}mm  ±${t.window.toFixed(1)}°` +
+      `   ${T[lab].gap.toFixed(0).padStart(3)}°        ${sm.maxTilt.toFixed(3).padStart(6)}°      ` +
+      `${String(sm.minPts).padStart(3)} 点   ` +
+      `${(sm.margin === -Infinity ? '  含まず' : sm.margin.toFixed(0).padStart(5) + 'mm')}` +
+      `${sm.noSolution ? '  ⚠解なし' + sm.noSolution : ''}`);
   }
-  console.log('\n  ※ 「最大位相ギャップ < 接地窓の全幅」は接触が切れない条件でしかない。');
-  console.log('    姿勢を保持できるかは、接地点の凸包が重心投影を含むか（静的支持余裕 > 0）で決まる。\n');
+  console.log(`
+  ※ 静的平衡は高さ・ピッチ・ロールを連立して解いている（${TSAMP} 位相で走査）。
+    「最大位相ギャップ < 接地窓」は接触が切れない条件でしかなく、支持条件ではない。
+    支持できるかは「解が存在するか」で、できるとしても機体は上表のぶん傾く。
+    最後の列は水平姿勢に固定した場合の凸包余裕で、参考値（傾けば釣り合う配置でも「含まず」になる）。
+`);
 
   console.log('■ 試験1: 推力方向が ψ に追従するか（駆動は A=B、方位保持なし）');
   const S1 = {};
@@ -469,15 +590,27 @@ if (import.meta.url === `file://${process.argv[1]}`) {
 
   console.log('\n  ケースB 卓上（接触子は地面に固定、150mm角0.5kgの荷、b=1.5mm, k=斜め, ψ=45°）');
   console.log('    位相は φ(i,k)=(i+k)Δφ を添字から直接作る（周期境界なし）。荷も静的釣合いから始める。');
-  console.log('    Δφ    波長(対角)   空間波                          シャッフル');
+  console.log('    位相原点 q0 を 8 通り走査する。1点だけ見ると起動位相の当たり外れを');
+  console.log('    「空間配置の効果」と取り違える。K は各行で空間波側の値に固定し、');
+  console.log('    シャッフルは同じ位相集合 {m·Δφ} から一様に引く（位相配置だけの比較にする）。\n');
+  console.log('    Δφ    波長(対角)   空間波: 完走/8  速度            シャッフル: 完走/8  速度');
+  const Q0 = [0, 45, 90, 135, 180, 225, 270, 315];
   for (const dphi of [180, 120, 90, 60, 30, 15]) {
     const lam = (360 / dphi) * P * Math.SQRT1_2;
-    const a = tableRun(dphi, { kdir: 'diag' }), b = tableRun(dphi, { shuffle: true });
-    const f = r => (r.fell ? `転倒 t=${r.fell.toFixed(2)}s`
-      : `${r.speed.toFixed(0)}mm/s ${r.dir.toFixed(0)}° 無接地${r.drop.toFixed(0)}% 傾き${r.tilt.toFixed(1)}°`).padEnd(30);
-    console.log(`    ${String(dphi).padStart(3)}°  ${lam.toFixed(0).padStart(5)} mm   ${f(a)}  ${f(b)}`);
+    const K0 = tableRun(dphi, { kdir: 'diag', q0: 0 }).K;
+    const roll = shuffle => {
+      let ok = 0; const sp = [];
+      for (const q0 of Q0) {
+        const r = tableRun(dphi, { kdir: 'diag', shuffle, q0: q0 * Math.PI / 180, Kfix: K0 });
+        if (!r.fell) { ok += 1; sp.push(r.speed); }
+      }
+      return { ok, txt: sp.length ? `${Math.min(...sp).toFixed(0)}〜${Math.max(...sp).toFixed(0)} mm/s` : '—' };
+    };
+    const a = roll(false), b = roll(true);
+    console.log(`    ${String(dphi).padStart(3)}°  ${lam.toFixed(0).padStart(5)} mm   ` +
+      `${String(a.ok).padStart(8)}/8  ${a.txt.padEnd(16)}${String(b.ok).padStart(10)}/8  ${b.txt}`);
   }
-  console.log('    → 荷の差し渡しは 150mm。');
+  console.log('    → 荷の差し渡しは 150mm。完走 = 3.2 秒間 傾き 8° を超えなかった。');
 
   console.log('\n■ 試験3: 走行中に ψ を 0°→90° へ振る（Δφ=60° k=斜め）');
   console.log('    操舵レート    速度                方向     滑り   荷重');

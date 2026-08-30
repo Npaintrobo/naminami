@@ -88,18 +88,30 @@ console.log('\n■ 回帰検査（読み込んだ直後、操作なし）');
   const r = await p2.evaluate(() => {
     const c = document.getElementById('view');
     const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
-    let ink = 0;
+    let ink = 0, opaque = 0;
     for (let i = 0; i < d.length; i += 4) {
+      /* 透明画素 (0,0,0,0) は背景色と数値が違うので、α を見ないと「未描画」を
+         「描画済み」と数えてしまい、真っ白な canvas でも 100% で合格してしまう。 */
+      if (d[i + 3] < 250) continue;
+      opaque += 1;
       if (Math.abs(d[i] - 10) > 6 || Math.abs(d[i + 1] - 14) > 6 || Math.abs(d[i + 2] - 13) > 6) ink += 1;
     }
+    const px = c.width * c.height;
     const txt = id => document.getElementById(id).textContent;
-    return { ink: ink / (c.width * c.height) * 100,
-             nan: ['rV', 'rPsi', 'rTilt'].some(id => /NaN|Infinity/.test(txt(id))) };
+    const num = id => parseFloat(txt(id));
+    return { ink: ink / px * 100, opaque: opaque / px * 100,
+             nan: ['rV', 'rPsi', 'rTilt'].some(id => /NaN|Infinity/.test(txt(id))),
+             v: num('rV'), q: num('rQ') };
   });
 
+  /* 背景そのものが塗られていなければ描画ループが回っていない */
+  if (r.opaque < 99) bad.push(`背景が塗られていない（不透明画素 ${r.opaque.toFixed(1)}%）`);
   if (r.ink < 5) bad.push(`キャンバスがほぼ背景のみ（描画 ${r.ink.toFixed(1)}%）`);
   if (r.nan) bad.push('読み出しに NaN / Infinity');
-  console.log(`  描画されている画素 ${r.ink.toFixed(1)}%`);
+  /* 物理の粗い回帰も見る。既定 A=B=2（200rpm）で a·q̇ = 126 mm/s、その 60〜105% */
+  if (!(r.q > 190 && r.q < 210)) bad.push(`波の回転数が想定外（${r.q}）`);
+  if (!(r.v > 75 && r.v < 133)) bad.push(`速度が想定範囲外（${r.v} mm/s、期待 75〜133）`);
+  console.log(`  描画 ${r.ink.toFixed(1)}% / 不透明 ${r.opaque.toFixed(1)}% / 速度 ${r.v} mm/s / 波 ${r.q} rpm`);
   console.log(bad.length ? '  ✗ ' + bad.join(' / ') : '  ✓ 読み込み直後から描画・読み出しとも正常');
   await p2.close();
   if (bad.length) process.exitCode = 1;
