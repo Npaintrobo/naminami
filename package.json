@@ -9,7 +9,8 @@
     "bench:3d": "node bench/polar3d.mjs",
     "bench:table": "node bench/table.mjs",
     "bench:mapping": "node bench/discrete-map.mjs && node bench/design-window.mjs",
-    "bench:all": "set -e; for f in bench/polar.mjs bench/phasestep.mjs bench/spatial.mjs bench/foot.mjs bench/run.mjs bench/wavetest.mjs bench/polar3d.mjs bench/table.mjs bench/discrete-map.mjs bench/design-window.mjs; do echo \"--- $f\"; node \"$f\"; done"
+    "bench:pareto": "node bench/pareto-window.mjs",
+    "bench:all": "set -e; for f in bench/polar.mjs bench/phasestep.mjs bench/spatial.mjs bench/foot.mjs bench/run.mjs bench/wavetest.mjs bench/polar3d.mjs bench/table.mjs bench/discrete-map.mjs bench/design-window.mjs bench/pareto-window.mjs; do echo \"--- $f\"; node \"$f\"; done"
   },
   "devDependencies": {
     "playwright": "1.49.1"
