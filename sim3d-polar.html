@@ -511,7 +511,11 @@
       const pen = -(car.y + p.y - car.tx * p.z + car.tz * p.x);
       if (pen <= 0) { p.prev = 0; p.n = 0; continue; }
 
-      const Nf = Math.max(0, KC * pen + CC * (pen - p.prev) / dt);
+      /* dt が 0 のフレーム（rAF の初回）で 0/0 にならないように守る。
+         静的釣合いから始めるようになって t=0 で既に接地しているため、
+         守らないと初回の1ステップで全状態が NaN になる。 */
+      const rate = dt > 0 ? (pen - p.prev) / dt : 0;
+      const Nf = Math.max(0, KC * pen + CC * rate);
       p.prev = pen;
       p.n = Nf;
       if (Nf <= 0) continue;
@@ -570,6 +574,7 @@
   }
 
   function step(dt) {
+    if (!(dt > 0)) return;
     control();
     /* 位相の細かさと、摩擦の正則化帯 VEPS/(mu g) の両方より細かく刻む */
     const fastest = Math.max(Math.abs(omegaOf("a")), Math.abs(omegaOf("b")), 1e-6);
@@ -1016,25 +1021,20 @@
     /* 接触があることと姿勢を保持できることは別。接地点の凸包が重心の投影を含まないと、
        接触していてもピッチ・ロールを支持できない。 */
     if (live.margin <= 0) {
-      msgs.push("⚠ 接地点の凸包が重心の投影を含まない位相があります（最小接地点数 " + live.minPts +
-                " 点）。接触は切れていなくても姿勢を支持できません。");
+      msgs.push("⚠ 支持不能。接地点の凸包が重心の投影を含まない位相があります（最小 " +
+                live.minPts + " 点）。接触があっても姿勢を保持できません。");
     }
 
     /* 位相ギャップは「車高が一定なら接触が切れる」という話でしかない。実際には機体が
        沈んで支持を探すので、これだけでは支持不能を意味しない（Δφ=60° は支持余裕 212mm ある）。
        跳ねやすさの目安として出すに留め、警告は支持余裕のほうで出す。 */
     if (live.gap > 2 * live.window) {
-      msgs.push("位相ギャップが接地窓の全幅（" + (2 * live.window).toFixed(0) +
-                "°）を超えています。車高が一定なら接触が切れる配り方です。実際は機体が沈んで" +
-                "支持を探すので静的には切れませんが、沈み込みが追いつかないと跳ねます。" +
-                "上下振幅 b を下げると収まります。");
+      msgs.push("ギャップが接地窓を超えています。静的には機体が沈んで支持を探すので切れませんが、" +
+                "沈み込みが追いつかないと跳ねます（b を下げると収まる）。");
     }
     if (!spec.kdiag) {
-      msgs.push("k を軸に平行にすると同位相の接触子が1列に並んで線接触になり、機体が首を振ります。" +
-                "位相を配れる段数も " + steps + " 段しかなく、斜めの " + (2 * spec.n - 1) + " 段より粗い Δφ しか使えません。");
-    }
-    if (spec.b > 3) {
-      msgs.push("上下振幅 b を下げると跳ねが減ります。推力は a·q̇ で決まるので b とは独立です。");
+      msgs.push("k が軸平行だと同位相の接触子が1列に並んで線接触になり首を振ります。" +
+                "位相を配れる段数も " + steps + " 段（斜めは " + (2 * spec.n - 1) + " 段）。");
     }
     note.textContent = msgs.join(" / ");
     note.hidden = msgs.length === 0;
@@ -1076,7 +1076,8 @@
   /* 自由落下から始めると、3秒経っても法線力が重量の 0.6 倍しかない過渡のまま。
      いまの位相での静的釣合い高さを二分法で解いて、そこから始める。 */
   function settle() {
-    for (const p of pads) { p.th = p.ph; p.y = -spec.b * Math.cos(p.th); }
+    /* いま走っている位相で釣り合わせる。Δφ や k を走行中に変えたときにも使う。 */
+    for (const p of pads) { p.th = p.ph - live.q; p.y = -spec.b * Math.cos(p.th); }
     const W = MASS * GRAV / ACC;
     const load = Y => { let f = 0; for (const p of pads) f += Math.max(0, -(Y + p.y)) * KC; return f; };
     let lo = -spec.b - 20, hi = spec.b + 1;
@@ -1105,11 +1106,13 @@
 
   sA.addEventListener("input", () => { shaft.a = Number(sA.value); sync(); });
   sB.addEventListener("input", () => { shaft.b = Number(sB.value); sync(); });
-  sP.addEventListener("input", () => { spec.dphi = Number(sP.value) * Math.PI / 180; buildPads(); sync(); });
+  /* 配列を組み替えたら釣合い高さと貫入量を取り直す。放っておくと前の配置の車高が
+     残って、変更した瞬間に食い込んだり浮いたりする。 */
+  sP.addEventListener("input", () => { spec.dphi = Number(sP.value) * Math.PI / 180; buildPads(); settle(); sync(); });
   sAmp.addEventListener("input", () => { spec.a = Number(sAmp.value); sync(); });
-  sB2.addEventListener("input", () => { spec.b = Number(sB2.value); sync(); });
+  sB2.addEventListener("input", () => { spec.b = Number(sB2.value); tune(); settle(); sync(); });
   sX.addEventListener("input", () => { opt.exag = Number(sX.value); sync(); });
-  sDp.addEventListener("input", () => { spec.dp = Number(sDp.value); tune(); sync(); });
+  sDp.addEventListener("input", () => { spec.dp = Number(sDp.value); tune(); settle(); sync(); });
   sT.addEventListener("input", () => { opt.target = Number(sT.value) * Math.PI / 180; sync(); });
   el("cHold").addEventListener("change", e => { opt.hold = e.target.checked; sync(); });
 
@@ -1134,7 +1137,7 @@
     spec.kdiag = diag;
     bKd.setAttribute("aria-pressed", diag ? "true" : "false");
     bKx.setAttribute("aria-pressed", diag ? "false" : "true");
-    buildPads(); sync();
+    buildPads(); settle(); sync();
   }
   bKd.addEventListener("click", () => setK(true));
   bKx.addEventListener("click", () => setK(false));
