@@ -4,7 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>和差位相式・偏極操舵波動面 3Dシミュレータ</title>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap">
 <style>
   :root {
     --ground: #0A0E0D;
@@ -16,8 +15,9 @@
     --y: #D2912F;
     --cmd: #8C7BE0;
     --warn: #E87A5C;
-    --sans: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic UI", sans-serif;
-    --mono: "JetBrains Mono", ui-monospace, monospace;
+    /* 外部フォントは読まない。単一ファイルでオフライン再現できることを優先する。 */
+    --sans: "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", system-ui, sans-serif;
+    --mono: ui-monospace, "SFMono-Regular", "Consolas", monospace;
   }
 
   * { box-sizing: border-box; }
@@ -240,7 +240,7 @@
     <div class="grp-head"><span>運転</span></div>
     <div class="seg three">
       <button id="pStraight" aria-pressed="true">直進</button>
-      <button id="pSteer" aria-pressed="false">操舵中</button>
+      <button id="pHold" aria-pressed="false">45&deg;へ保持</button>
       <button id="pTurn" aria-pressed="false">波を止めて操舵</button>
     </div>
   </div>
@@ -252,6 +252,12 @@
   <div class="grp ax-y">
     <div class="grp-head"><span>B軸 &phi;&#775;<sub>B</sub></span><b id="vB">2.00</b></div>
     <input type="range" id="sB" min="-3" max="3" step="0.05" value="2">
+  </div>
+
+  <div class="grp">
+    <div class="grp-head"><span>方位を保持する</span><b id="vT">0&deg;</b></div>
+    <label class="chk"><input type="checkbox" id="cHold"> 差動で追い込み、揃えて保持</label>
+    <input type="range" id="sT" min="0" max="359" step="1" value="0">
   </div>
 
   <div class="grp">
@@ -342,10 +348,27 @@
      静的な沈み込みが常に spec.dp になるように整定する。 */
   let KC = 47, CC = 0.15;       // 接地ばね [N/mm]、減衰 [N.s/mm]
 
+  /* 「静的な沈み込みが δp」を定義から解く。最下点の貫入が δp になる高さでは
+     各接触子の貫入は max(0, δp − b(1−cos θ)) なので、その総和が重量を支えるように
+     KC を決める。総和は位相で振れるので1周期で平均する。
+     以前は「常に全体の12%が接地」と決め打ちしていて、実際の接地数（9〜36本）と
+     合っていなかった。 */
   function tune() {
-    const nc = Math.max(3, Math.round(pads.length * 0.12));   // 同時接地する本数の目安
-    KC = (MASS * GRAV / ACC) / (nc * spec.dp);
+    let sumPen = 0, sumCnt = 0;
+    const S = 72;
+    for (let k = 0; k < S; k += 1) {
+      const q = k / S * 2 * Math.PI;
+      for (const p of pads) {
+        const pen = spec.dp - spec.b * (1 - Math.cos(p.ph - q));
+        if (pen > 0) { sumPen += pen; sumCnt += 1; }
+      }
+    }
+    const pen = Math.max(sumPen / S, 1e-6);            // 1周期平均の総貫入量 [mm]
+    const nc = Math.max(1, sumCnt / S);                // 1周期平均の接地本数
+    KC = (MASS * GRAV / ACC) / pen;
     CC = 2 * 0.35 * Math.sqrt(nc * KC * 1000 * MASS) / 1000 / nc;
+    live.nc = nc;
+    live.window = Math.acos(clamp(1 - spec.dp / spec.b, -1, 1)) * 180 / Math.PI;
   }
   const ACC = 1000;             // N, kg -> mm/s^2
 
@@ -359,12 +382,32 @@
   const car = { x: 0, z: 0, ride: 0, y: 0, tx: 0, tz: 0 };
   const vel = { x: 0, z: 0, y: 0, wx: 0, wz: 0 };
   const view = { yaw: 0.72, pitch: 0.5, dist: 1400 };
-  const opt = { mech: true, edge: true, paused: false, exag: 1 };
-  const live = { q: 0, qd: 0, psi: 0, psid: 0, slip: 0, dist: 0, contact: 0, load: 1 };
+  const opt = { mech: true, edge: true, paused: false, exag: 1, hold: false, target: 0 };
+  const live = { q: 0, qd: 0, psi: 0, psid: 0, slip: 0, dist: 0, contact: 0, load: 1,
+                 nc: 0, window: 0, gap: 0 };
+
+  /* 固定刻みで回したときの周期平均を採る計測器 */
+  const meter = { on: false, t: 0, dx: 0, dz: 0, slip: 0, load: 0, load2: 0, tilt2: 0, cnt: 0, minC: 1e9 };
   const trail = [];
 
-  const omegaOf = s => shaft[s] / 3 * spec.rpm * Math.PI / 30;
-  const rpmOf = s => Math.abs(shaft[s]) / 3 * spec.rpm;
+  /* shaft はスライダの値、drive は実際に軸へ行く値。方位保持を入れると差が出る。 */
+  const drive = { a: 2, b: 2 };
+  const omegaOf = s => drive[s] / 3 * spec.rpm * Math.PI / 30;
+  const rpmOf = s => drive[s] / 3 * spec.rpm;      // 逆転が読めるように符号つき
+
+  const wrap = v => { let d = v % (2 * Math.PI); if (d > Math.PI) d -= 2 * Math.PI; if (d < -Math.PI) d += 2 * Math.PI; return d; };
+
+  /* 方位保持。任意方向へ走るには、差動を打って ψ を目標へ寄せたあと両軸を同速に戻して
+     保持する必要がある。プリセットの「操舵中」は差動を掛けっぱなしなので ψ が回り続け、
+     固定方位走行にはならない。ここでその制御を実際に閉じる。 */
+  function control() {
+    if (!opt.hold) { drive.a = shaft.a; drive.b = shaft.b; return; }
+    const base = (shaft.a + shaft.b) / 2;
+    const err = wrap(opt.target - live.psi);
+    const d = Math.abs(err) < 0.009 ? 0 : clamp(err * 0.6, -1.2, 1.2);   // 0.5° 以内で保持
+    drive.a = base + d;
+    drive.b = base - d;
+  }
 
   const pads = [];
 
@@ -378,6 +421,15 @@
                     th: 0, y: 0, n: 0, ox: 0, oz: 0, prev: 0 });
       }
     }
+    /* 支持が切れるかどうかを決めるのは「1波長を張るか」ではなく、
+       位相集合の最大循環ギャップが接地窓 2θc に収まるかどうか。 */
+    const uniq = [...new Set(pads.map(p => ((p.ph % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)))].sort((x, y) => x - y);
+    let gap = 0;
+    for (let i = 0; i < uniq.length; i += 1) {
+      const d = (i === uniq.length - 1 ? uniq[0] + 2 * Math.PI : uniq[i + 1]) - uniq[i];
+      if (d > gap) gap = d;
+    }
+    live.gap = gap * 180 / Math.PI;
     tune();
   }
 
@@ -414,7 +466,11 @@
       /* 面内速度。第1項が推力、第2項は操舵中だけ出る横成分で山では消える */
       const ux = -spec.a * qd * cs * cw - spec.a * psid * sn * sw;
       const uz = -spec.a * qd * cs * sw + spec.a * psid * sn * cw;
-      const gx = vel.x + ux, gz = vel.z + uz;
+      /* 接地点は重心より HCG 下にあるので、機体の角速度が水平速度 (ω×r) を作る。
+         ω=(wx, 0, wz)、r=(x, -HCG, z) で (ω×r)_x = wz·HCG、(ω×r)_z = -wx·HCG。
+         首を振っている条件ではこれが滑りの半分を占めることがある。 */
+      const gx = vel.x + vel.wz * HCG + ux;
+      const gz = vel.z - vel.wx * HCG + uz;
       const m = Math.max(Math.hypot(gx, gz), VEPS);
       const fx = -MU * Nf * gx / m, fz = -MU * Nf * gz / m;
       Fx += fx; Fz += fz;
@@ -442,9 +498,23 @@
 
     live.slip = wsum > 0 ? sl / wsum : 0;
     live.dist += Math.hypot(vel.x, vel.z) * dt;
+
+    /* 瞬時値ではなく周期平均を採るための積算。HUD は瞬時値だが、
+       bench/polar3d.mjs はここを読む。 */
+    const m = meter;
+    if (m.on) {
+      m.t += dt;
+      m.dx += vel.x * dt; m.dz += vel.z * dt;
+      m.slip += live.slip * dt;
+      m.load += live.load * dt; m.load2 += live.load * live.load * dt;
+      m.tilt2 += (car.tx * car.tx + car.tz * car.tz) * dt;
+      m.cnt += cnt * dt;
+      if (cnt < m.minC) m.minC = cnt;
+    }
   }
 
   function step(dt) {
+    control();
     /* 位相の細かさと、摩擦の正則化帯 VEPS/(mu g) の両方より細かく刻む */
     const fastest = Math.max(Math.abs(omegaOf("a")), Math.abs(omegaOf("b")), 1e-6);
     const band = VEPS / MU_G * 0.25;
@@ -738,13 +808,15 @@
 
       if (!opt.mech) continue;
 
-      /* 逆旋回する2つの偏心。A は角 (th + psi - pi/2)、B は角 (psi - th + pi/2)。
-         2本を継いだ先端がそのままパッドの面内変位 a.sin(th).[cos psi, sin psi] になる。 */
+      /* 逆旋回する2つの偏心。th = ph - q、φA = q + ψ、φB = q - ψ なので
+           th + ψ = ph - φB   （＝この腕は B軸で回る）
+           th - ψ = ph - φA   （＝こちらが A軸）
+         2本を継いだ先端がパッドの面内変位 a.sin(th).[cos ψ, sin ψ] になる。 */
       const nx = p.x + car.x, nz = p.z + car.z;
-      const aA = p.th + live.psi - Math.PI / 2;
-      const jx = nx + Math.cos(aA) * armL, jz = nz + Math.sin(aA) * armL;
-      armQuad(nx, nz, jx, jz, hy, armW, MAT_ARM_A);
-      armQuad(jx, jz, cxp, czp, hy, armW, MAT_ARM_B);
+      const angB = p.th + live.psi - Math.PI / 2;
+      const jx = nx + Math.cos(angB) * armL, jz = nz + Math.sin(angB) * armL;
+      armQuad(nx, nz, jx, jz, hy, armW, MAT_ARM_B);
+      armQuad(jx, jz, cxp, czp, hy, armW, MAT_ARM_A);
       box(nx, hy, nz, armW * 1.8, armW * 1.4, armW * 1.8, MAT_HUB);
       box(cxp, hy, czp, armW * 1.6, armW * 1.2, armW * 1.6, MAT_HUB);
     }
@@ -863,7 +935,7 @@
   const note = el("note");
 
   const sA = el("sA"), sB = el("sB"), sP = el("sP"), sAmp = el("sAmp"),
-        sB2 = el("sB2"), sX = el("sX"), sDp = el("sDp");
+        sB2 = el("sB2"), sX = el("sX"), sDp = el("sDp"), sT = el("sT");
 
   function sync() {
     el("vA").textContent = shaft.a.toFixed(2);
@@ -872,24 +944,29 @@
     el("vAmp").textContent = spec.a.toFixed(1) + " mm";
     el("vB2").textContent = spec.b.toFixed(1) + " mm";
     el("vDp").textContent = spec.dp.toFixed(2) + " mm";
+    el("vT").textContent = Math.round(opt.target * 180 / Math.PI) + "°";
     el("vX").textContent = "×" + opt.exag.toFixed(1);
 
     const dphiDeg = spec.dphi * 180 / Math.PI;
     const lam = (360 / dphiDeg) * spec.pitch * (spec.kdiag ? Math.SQRT1_2 : 1);
-    /* 位相を配れる段数。斜めなら i+j で 2n-1 段、軸平行なら i だけで n 段 */
-    const steps = spec.kdiag ? 2 * spec.n - 1 : spec.n;
-    const span = steps * dphiDeg;
+    const steps = spec.kdiag ? 2 * spec.n - 1 : spec.n;   // 位相を配れる段数
 
-    const msgs = ["波長 λ ≈ " + lam.toFixed(0) + " mm"];
-    if (span < 360) {
-      msgs.push("⚠ 配列が1波長を張れていません（位相が " + span.toFixed(0) +
-                "° 分しかない）。山にいる接触子が存在しない瞬間があり、" +
-                "逆向きに押す接触子が支配して失速・逆走します。Δφ を " +
-                Math.ceil(360 / steps) + "° 以上にしてください。");
+    const msgs = ["波長 λ ≈ " + lam.toFixed(0) + " mm",
+                  "接地窓 ±" + live.window.toFixed(1) + "° / 最大位相ギャップ " + live.gap.toFixed(0) +
+                  "° / 平均接地 " + live.nc.toFixed(1) + " 本"];
+
+    /* 支持が切れる条件は「1波長を張るか」ではない。位相集合の最大循環ギャップが
+       接地窓の全幅 2θc を超えたときに、山にいる接触子が居ない瞬間ができる。
+       θc = acos(1 − δp/b)。b=6mm, δp=0.3mm なら θc≈18.2°、2θc≈36.4°。 */
+    if (live.gap > 2 * live.window) {
+      msgs.push("⚠ 最大位相ギャップ " + live.gap.toFixed(0) + "° が接地窓の全幅 " +
+                (2 * live.window).toFixed(0) + "° を超えています。山にいる接触子が存在しない瞬間ができ、" +
+                "θ が 90° を超えた（面内速度が逆向きの）接触子が荷重を持って失速・逆走します。" +
+                "Δφ を粗くするか、δp を大きくして窓を広げてください。");
     }
     if (!spec.kdiag) {
       msgs.push("k を軸に平行にすると同位相の接触子が1列に並んで線接触になり、機体が首を振ります。" +
-                "位相を配れる段数も " + steps + " 段しかなく、斜めの " + (2 * spec.n - 1) + " 段より不利です。");
+                "位相を配れる段数も " + steps + " 段しかなく、斜めの " + (2 * spec.n - 1) + " 段より粗い Δφ しか使えません。");
     }
     if (spec.b > 3) {
       msgs.push("上下振幅 b を下げると跳ねが減ります。推力は a·q̇ で決まるので b とは独立です。");
@@ -897,9 +974,9 @@
     note.textContent = msgs.join(" / ");
     note.hidden = msgs.length === 0;
 
-    for (const [id, on] of [["pStraight", shaft.a === shaft.b && shaft.a > 0],
-                            ["pSteer", shaft.a !== shaft.b && shaft.a + shaft.b !== 0],
-                            ["pTurn", Math.abs(shaft.a + shaft.b) < 1e-9 && shaft.a !== 0]]) {
+    for (const [id, on] of [["pStraight", !opt.hold && shaft.a === shaft.b && shaft.a > 0],
+                            ["pHold", opt.hold],
+                            ["pTurn", !opt.hold && Math.abs(shaft.a + shaft.b) < 1e-9 && shaft.a !== 0]]) {
       el(id).setAttribute("aria-pressed", on ? "true" : "false");
     }
   }
@@ -931,13 +1008,27 @@
     el("rDist").textContent = (live.dist / 1000).toFixed(1) + " m";
   }
 
+  /* 自由落下から始めると、3秒経っても法線力が重量の 0.6 倍しかない過渡のまま。
+     いまの位相での静的釣合い高さを二分法で解いて、そこから始める。 */
+  function settle() {
+    for (const p of pads) { p.th = p.ph; p.y = -spec.b * Math.cos(p.th); }
+    const W = MASS * GRAV / ACC;
+    const load = Y => { let f = 0; for (const p of pads) f += Math.max(0, -(Y + p.y)) * KC; return f; };
+    let lo = -spec.b - 20, hi = spec.b + 1;
+    for (let i = 0; i < 60; i += 1) {
+      const mid = (lo + hi) / 2;
+      if (load(mid) > W) lo = mid; else hi = mid;
+    }
+    car.y = (lo + hi) / 2;
+    for (const p of pads) p.prev = Math.max(0, -(car.y + p.y));
+  }
+
   function resetRun() {
     car.x = 0; car.z = 0; car.tx = 0; car.tz = 0;
-    car.y = spec.b + 0.4;
     vel.x = 0; vel.z = 0; vel.y = 0; vel.wx = 0; vel.wz = 0;
     phiA = 0; phiB = 0;
     live.dist = 0;
-    for (const p of pads) p.prev = 0;
+    settle();
     trail.length = 0;
   }
 
@@ -954,10 +1045,24 @@
   sB2.addEventListener("input", () => { spec.b = Number(sB2.value); sync(); });
   sX.addEventListener("input", () => { opt.exag = Number(sX.value); sync(); });
   sDp.addEventListener("input", () => { spec.dp = Number(sDp.value); tune(); sync(); });
+  sT.addEventListener("input", () => { opt.target = Number(sT.value) * Math.PI / 180; sync(); });
+  el("cHold").addEventListener("change", e => { opt.hold = e.target.checked; sync(); });
 
-  el("pStraight").addEventListener("click", () => setShafts(2, 2));
-  el("pSteer").addEventListener("click", () => setShafts(2.5, 1.5));
-  el("pTurn").addEventListener("click", () => setShafts(2, -2));
+  el("pStraight").addEventListener("click", () => { setHold(false); setShafts(2, 2); });
+  /* 差動を掛けっぱなしにすると ψ が回り続けて固定方位にならない。
+     任意方位を出すには、差動で追い込んだあと両軸を揃えて保持する制御が要る。 */
+  el("pHold").addEventListener("click", () => {
+    sT.value = "45";
+    opt.target = 45 * Math.PI / 180;
+    setHold(true);
+    setShafts(2, 2);
+  });
+  el("pTurn").addEventListener("click", () => { setHold(false); setShafts(2, -2); });
+
+  function setHold(on) {
+    opt.hold = on;
+    el("cHold").checked = on;
+  }
 
   const bKd = el("bKd"), bKx = el("bKx");
   function setK(diag) {
@@ -1059,6 +1164,47 @@
   }
 
   window.addEventListener("resize", resize);
+
+  /* ヘッドレス計測の口（bench/polar3d.mjs が使う）。UI からは触らない。 */
+  window.__probe = {
+    config(o) {
+      if (o.dphiDeg !== undefined) spec.dphi = o.dphiDeg * Math.PI / 180;
+      if (o.kdiag !== undefined) spec.kdiag = o.kdiag;
+      if (o.a !== undefined) spec.a = o.a;
+      if (o.b !== undefined) spec.b = o.b;
+      if (o.dp !== undefined) spec.dp = o.dp;
+      buildPads();
+      if (o.shaftA !== undefined) shaft.a = o.shaftA;
+      if (o.shaftB !== undefined) shaft.b = o.shaftB;
+      opt.hold = !!o.hold;
+      if (o.targetDeg !== undefined) opt.target = o.targetDeg * Math.PI / 180;
+      opt.paused = true;
+      resetRun();
+    },
+    /* 固定刻みで回す。warm 秒は捨てて、その後を平均する。 */
+    run(seconds, warm, dt) {
+      const m = meter;
+      m.on = false;
+      for (let t = 0; t < warm; t += dt) step(dt);
+      Object.assign(m, { on: true, t: 0, dx: 0, dz: 0, slip: 0, load: 0, load2: 0, tilt2: 0, cnt: 0, minC: 1e9 });
+      for (let t = 0; t < seconds; t += dt) step(dt);
+      m.on = false;
+      const tip = spec.a * Math.abs(live.qd);
+      const mean = m.load / m.t;
+      return {
+        speed: Math.hypot(m.dx, m.dz) / m.t,
+        dir: Math.atan2(m.dz, m.dx) * 180 / Math.PI,
+        psi: live.psi * 180 / Math.PI,
+        slip: tip > 1 ? m.slip / m.t / tip : null,
+        load: mean,
+        ripple: Math.sqrt(Math.max(0, m.load2 / m.t - mean * mean)) / Math.max(mean, 1e-9),
+        tilt: Math.sqrt(m.tilt2 / m.t) * 180 / Math.PI,
+        contact: m.cnt / m.t,
+        minC: m.minC,
+        gap: live.gap, window: live.window
+      };
+    }
+  };
 
   /* ---- ループ ---- */
   let last = 0, accum = 0;

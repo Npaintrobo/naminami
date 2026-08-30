@@ -70,7 +70,11 @@ function core(pads, kin, { M = 20, HCG = 100, K = 47, C = 0.15, load = null } = 
       if (Nf <= 0) continue;
       cnt += 1; SN += Nf;
       const wx_ = ux * cp - uz * sp, wz_ = ux * sp + uz * cp;
-      const gx = vX + vp * rz + wx_, gz = vZ - vp * rx + wz_;
+      /* 接地点は重心より HCG 下にあるので、機体の角速度 ω=(wx, vp, wz) が
+         そこに水平速度 (ω×r) を作る。ヨーぶんだけでなくピッチ・ロールぶんも要る。
+         r = (rx, -HCG, rz) として (ω×r)_x = vp·rz + wz·HCG, (ω×r)_z = -vp·rx - wx·HCG。 */
+      const gx = vX + vp * rz + wz * HCG + wx_;
+      const gz = vZ - vp * rx - wx * HCG + wz_;
       const m = Math.max(Math.hypot(gx, gz), VEPS);
       const fx = -MU * Nf * gx / m, fz = -MU * Nf * gz / m;
       Fx += fx; Fz += fz;
@@ -102,10 +106,17 @@ function core(pads, kin, { M = 20, HCG = 100, K = 47, C = 0.15, load = null } = 
 }
 
 /* ── 2つの運動学 ──────────────────────────────── */
+
+/* psiOf(t) は [psi, psi_dot] を返す。ψ̇ 項 a·ψ̇·sin(th)·[-sin psi, cos psi] は
+   操舵中だけ出る横成分で、山（th=0）では消える。これを落とすと操舵過渡が
+   まったく評価できない（以前の版がそうだった）。 */
 const polar = (pads, psiOf) => core(pads, (p, t) => {
-  const th = p.ph - W * t, ps = psiOf(t), c = Math.cos(ps), s = Math.sin(ps);
-  const sn = Math.sin(th), cs = Math.cos(th);
-  return [-BREF.v * cs, AMP * sn * c, AMP * sn * s, -AMP * W * cs * c, -AMP * W * cs * s];
+  const [ps, pd] = psiOf(t);
+  const c = Math.cos(ps), s = Math.sin(ps);
+  const th = p.ph - W * t, sn = Math.sin(th), cs = Math.cos(th);
+  return [-BREF.v * cs, AMP * sn * c, AMP * sn * s,
+          -AMP * W * cs * c - AMP * pd * sn * s,
+          -AMP * W * cs * s + AMP * pd * sn * c];
 });
 
 const shareXYr = (pads, cmd, retract) => {
@@ -145,7 +156,7 @@ console.log(`  案Aはそれを市松で X/Y に折半、偏極式は全部が�
 console.log('■ 試験1: 推力方向が指令に追従するか（案Aは停止軸リトラクトあり）');
 const R = {};
 for (const [tag, dphi, kdir] of [['60x', 60, 'x'], ['60d', 60, 'diag'], ['15d', 15, 'diag'], ['15x', 15, 'x']]) {
-  R['P' + tag] = sweep(`偏極操舵 Δφ=${dphi}° k=${kdir}`, dphi, (p, c) => polar(p, () => c), kdir);
+  R['P' + tag] = sweep(`偏極操舵 Δφ=${dphi}° k=${kdir}`, dphi, (p, c) => polar(p, () => [c, 0]), kdir);
 }
 for (const [tag, dphi, kdir] of [['60d', 60, 'diag'], ['15d', 15, 'diag']]) {
   R['S' + tag] = sweep(`直交2ラティス Δφ=${dphi}° k=${kdir}`, dphi, shareXY, kdir);
@@ -156,7 +167,7 @@ console.log('■ 試験2: 空間位相をシャッフルすると推力が落ち
 console.log('  ケースA 車両（12×12接触子が大きな剛体の下に全部入る）Δφ=60°, k=斜め, ψ=45°');
 console.log('    位相の配り方        速度      方向     滑り  最小接地  荷重リップル');
 for (const [lab, sh] of [['空間波（勾配あり）', false], ['同じ位相集合をシャッフル', true]]) {
-  const r = polar(lattice(60, { kdir: 'diag', shuffle: sh }), () => Math.PI / 4);
+  const r = polar(lattice(60, { kdir: 'diag', shuffle: sh }), () => [Math.PI / 4, 0]);
   console.log(`    ${lab.padEnd(20)} ${r.speed.toFixed(0).padStart(4)} mm/s  ${r.dir.toFixed(1).padStart(6)}°  ` +
     `${(r.slip * 100).toFixed(0).padStart(3)}%  ${String(r.minC).padStart(4)}    ${(r.nripple * 100).toFixed(0).padStart(3)}%`);
 }
@@ -195,7 +206,9 @@ function tableRun(pads, psi, { S = 150, M = 0.5, HCG = 15, K = 2.2, C = 0.006 } 
       if (Nf <= 0) continue;
       cnt += 1; SN += Nf;
       const ux = -AMP * W * Math.cos(th) * c, uz = -AMP * W * Math.cos(th) * sn;
-      const gx = vX + vp * rz - ux, gz = vZ - vp * rx - uz;   // 荷 − 接触子
+      /* 荷 − 接触子。荷自身の角速度による接地点速度 (ω×r) も足す */
+      const gx = vX + vp * rz + wz * HCG - ux;
+      const gz = vZ - vp * rx - wx * HCG - uz;
       const m = Math.max(Math.hypot(gx, gz), VEPS);
       const fx = -MU * Nf * gx / m, fz = -MU * Nf * gz / m;
       Fx += fx; Fz += fz; Ty += rz * fx - rx * fz;
@@ -225,7 +238,11 @@ for (const [lab, sh] of [['空間波（勾配あり）', false], ['同じ位相�
 console.log('\n■ 試験3: 走行中に ψ を 0°→90° へ振る（Δφ=60°, k=斜め）');
 console.log('    操舵レート    速度      方向     滑り   荷重リップル');
 for (const rate of [0, 45, 180, 720]) {
-  const psiOf = t => Math.min(Math.PI / 2, Math.max(0, (t - WARM)) * rate * Math.PI / 180);
+  const R = rate * Math.PI / 180;
+  const psiOf = t => {
+    const raw = Math.max(0, t - WARM) * R;
+    return raw >= Math.PI / 2 ? [Math.PI / 2, 0] : [raw, R];
+  };
   const r = polar(lattice(60, { kdir: 'diag' }), psiOf);
   console.log(`    ${String(rate).padStart(4)}°/s   ${r.speed.toFixed(0).padStart(4)} mm/s  ${r.dir.toFixed(1).padStart(6)}°  ` +
     `${(r.slip * 100).toFixed(0).padStart(3)}%   ${(r.nripple * 100).toFixed(0).padStart(3)}%`);
@@ -259,7 +276,7 @@ console.log('\n■ 上下振幅 b を下げる（a=6mm 固定, Δφ=15°, k=斜�
 console.log('    b      速度      滑り   最小接地  荷重リップル');
 for (const b of [6, 3, 1.5, 0.8]) {
   BREF.v = b;
-  const r = polar(lattice(15, { kdir: 'diag' }), () => Math.PI / 4);
+  const r = polar(lattice(15, { kdir: 'diag' }), () => [Math.PI / 4, 0]);
   console.log(`    ${String(b).padStart(3)}mm  ${r.speed.toFixed(0).padStart(4)} mm/s  ${(r.slip * 100).toFixed(0).padStart(3)}%  ` +
     `${String(r.minC).padStart(4)}    ${(r.nripple * 100).toFixed(0).padStart(3)}%`);
 }
